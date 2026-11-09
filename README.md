@@ -16,7 +16,9 @@ To add a node: pick a filter from the menus along the top (one per GEGL
 category, on as many rows as the window's width needs), click **Add**,
 press **Shift+A** or right-click on the canvas (the node goes where you clicked), or type in the search
 field and press Enter. Link nodes by dragging from a green Output dot to
-an Input dot; the Output node's input is what the layer shows.
+an Input dot; the Output node's input is what the layer shows. The Layer
+and Output nodes have a bold title and a badge, and cannot be deleted.
+**Arrange** lays the nodes out in columns from the layer to the output.
 
 ## What is in here
 
@@ -56,7 +58,7 @@ compiler), and GtkNodes with GObject introspection. GtkNodes is not
 packaged; build the `sandbranch` branch of
 [sandbranch/gtknodes](https://github.com/sandbranch/gtknodes) next to
 this repository, with its `dev/build-local.sh` (into `../gtknodes/_inst`).
-That branch has the two fixes the editor needs (below). Then:
+That branch has the fixes the editor needs (below). Then:
 
     dev/install.sh             # nodes:graph and the plug-in, for you
     dev/install.sh --remove
@@ -68,7 +70,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-92 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+110 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and
@@ -77,6 +79,19 @@ the editor's own calls, with the layer checked pixel by pixel against
 plain GEGL after each change and a screenshot in
 `tests/output/gui/live.png`. GIMP runs isolated from your own folders,
 and the run fails if anything in them changed.
+
+## Changes are incremental
+
+When an edit changes only values (the same operations, linked the same
+way), `nodes:graph` sets the new values on the nodes it already has,
+instead of building the graph again; and every node in it keeps its
+result (GEGL's cache policy "always"; by itself GEGL keeps it only for
+some operations). So only the changed node and what follows it are
+computed again. Measured on a 2000x2000 image, a brightness change after
+a bilateral filter: 0.9 s when built anew, 0.01 s now. Adding, removing
+or relinking a node builds the graph anew. The cached results use
+memory, within GEGL's tile cache (in GIMP, its tile cache size); how
+much in practice has not been measured yet.
 
 ## Fixes in GtkNodes
 
@@ -89,6 +104,10 @@ for upstream:
 - `fix/child-y`: a node's `y` place was set from, and read back as, its
   `x`, so nodes ended up on the diagonal (also in
   `gtk_nodes_node_view_save` and `load`).
+- `fix/icon-nullable`: `gtk_nodes_node_set_icon_name` takes `NULL` (no
+  icon, no button), but its introspection data refused `None`. Without
+  it, the Layer and Output nodes keep a delete button that does
+  nothing.
 
 ## GIMP's theme
 

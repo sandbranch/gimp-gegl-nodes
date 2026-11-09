@@ -135,6 +135,47 @@ check("a filter picked in the menu row is added", len(set(editor.nodes) - before
 check("nodes are styled out of the theme's box background",
       all(n.get_style_context().has_class("gegl-nodes-node") for n in editor.nodes.values()))
 
+# the Layer and Output nodes look different
+check("Layer and Output are marked as the ends",
+      all(editor.nodes[k].get_style_context().has_class("gegl-nodes-end")
+          for k in (G.LAYER, G.OUTPUT)) and
+      not any(n.get_style_context().has_class("gegl-nodes-end")
+              for k, n in editor.nodes.items() if k not in (G.LAYER, G.OUTPUT)))
+
+# automatic layout: a glow, placed badly
+editor.load(G.new_graph())
+pump()
+b = editor.add_op("gegl:gaussian-blur", 700, 300)
+sc = editor.add_op("svg:screen", 60, 260)
+vg = editor.add_op("gegl:vignette", 400, 30)
+editor.link("layer", b)
+editor.link("layer", sc)
+editor.link(b, sc, "aux")
+editor.link(sc, vg)
+editor.link(vg, "output")
+pump()
+string_before = G.serialize(editor.graph())
+place = editor.arrange()
+pump()
+size = {k: (n.get_allocated_width(), n.get_allocated_height()) for k, n in editor.nodes.items()}
+links = editor.graph()["links"]
+check("arrange: every node right of what feeds it", all(
+    place[l["from"]][0] + size[l["from"]][0] < place[l["to"]][0] for l in links), place)
+boxes = [(place[k][0], place[k][1], place[k][0] + size[k][0], place[k][1] + size[k][1])
+         for k in place]
+check("arrange: no two nodes overlap", not any(
+    a[0] < c[2] and c[0] < a[2] and a[1] < c[3] and c[1] < a[3]
+    for i, a in enumerate(boxes) for c in boxes[i + 1:]), boxes)
+check("arrange: the layer first, the output last",
+      place[G.LAYER][0] == min(x for x, y in place.values()) and
+      place[G.OUTPUT][0] == max(x for x, y in place.values()))
+check("arrange: a link past a node keeps clear of it (the blur below the layer)",
+      place[b][1] >= place[G.LAYER][1] + size[G.LAYER][1])
+check("arrange: the nodes are where it says",
+      all((editor.view.child_get_property(editor.nodes[k], "x"),
+           editor.view.child_get_property(editor.nodes[k], "y")) == p for k, p in place.items()))
+check("arrange: the graph is the same", G.serialize(editor.graph()) == string_before)
+
 shot = os.environ.get("GN_SHOT")
 if shot:
     # (the screenshot of the page is taken by run.sh)

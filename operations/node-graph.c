@@ -38,6 +38,13 @@
  *
  * Otherwise it shows the input unchanged and says why in "error".
  *
+ * When the graph changes only in values (the same operations, linked
+ * the same way), the values are set on the nodes already there, and only
+ * the nodes whose values changed, and what follows them, are computed
+ * again: every node in the graph keeps its result (cache policy
+ * "always"), so what comes before is not. Otherwise the graph is built
+ * anew.
+ *
  * "layout" is not used here: the node editor of the GIMP plug-in keeps
  * the positions of its nodes in it, so that they are saved in the XCF
  * with the filter.
@@ -76,6 +83,7 @@ typedef struct
 {
   gchar  *string;  /* the graph that was built */
   GSList *stale;   /* nodes of the graph before, unlinked */
+  GSList *nodes;   /* the nodes of the graph built, in GEGL's order */
 } State;
 
 static const gchar * const forbidden_categories[] =
@@ -143,11 +151,30 @@ forbidden (GeglNode *node)
   return why;
 }
 
+/* the nodes of a graph, but its proxies */
+static GSList *
+graph_nodes (GeglNode *graph,
+             GSList   *leave_out)
+{
+  GeglNode *input  = gegl_node_get_input_proxy (graph, "input");
+  GeglNode *output = gegl_node_get_output_proxy (graph, "output");
+  GSList   *children = gegl_node_get_children (graph);
+  GSList   *nodes = NULL, *l;
+
+  for (l = children; l; l = l->next)
+    if (l->data != input && l->data != output && ! g_slist_find (leave_out, l->data))
+      nodes = g_slist_prepend (nodes, g_object_ref (l->data));
+  g_slist_free (children);
+  return g_slist_reverse (nodes);
+}
+
 /* builds the graph in a scratch graph and checks every operation in it;
- * NULL if it may be used, otherwise why not */
+ * NULL if it may be used, otherwise why not. The scratch graph is put in
+ * *scratch_out (when it may be used), never processed. */
 static gchar *
-check (const gchar *string,
-       gdouble      rel_dim)
+check (const gchar  *string,
+       gdouble       rel_dim,
+       GeglNode    **scratch_out)
 {
   GeglNode *scratch = gegl_node_new ();
   GeglNode *input   = gegl_node_get_input_proxy (scratch, "input");
@@ -169,8 +196,136 @@ check (const gchar *string,
     why = forbidden (GEGL_NODE (l->data));
   g_slist_free (children);
 
-  g_object_unref (scratch);
+  if (why == NULL && scratch_out)
+    *scratch_out = scratch;
+  else
+    g_object_unref (scratch);
   return why;
+}
+
+/* where a node gets its input from: the index of the producer in nodes,
+ * -1 for the graph's input, -2 for nothing; and from which output pad */
+static gint
+producer_of (GeglNode     *node,
+             const gchar  *pad,
+             GSList       *nodes,
+             GeglNode     *input,
+             const gchar **out_pad)
+{
+  gchar    *producer_pad = NULL;
+  GeglNode *producer = gegl_node_get_producer (node, (gchar *) pad, &producer_pad);
+  gint      index;
+
+  *out_pad = NULL;
+  if (producer == NULL)
+    return -2;
+  *out_pad = g_intern_string (producer_pad);
+  g_free (producer_pad);
+  if (producer == input)
+    return -1;
+  index = g_slist_index (nodes, producer);
+  return index < 0 ? -3 : index;
+}
+
+/* TRUE if the two graphs have the same operations, linked the same way */
+static gboolean
+same_shape (GeglNode *a_graph,
+            GSList   *a,
+            GeglNode *b_graph,
+            GSList   *b)
+{
+  GeglNode    *a_in  = gegl_node_get_input_proxy (a_graph, "input");
+  GeglNode    *b_in  = gegl_node_get_input_proxy (b_graph, "input");
+  GeglNode    *a_out = gegl_node_get_output_proxy (a_graph, "output");
+  GeglNode    *b_out = gegl_node_get_output_proxy (b_graph, "output");
+  const gchar *a_pad, *b_pad;
+  GSList      *la, *lb;
+
+  if (g_slist_length (a) != g_slist_length (b))
+    return FALSE;
+  if (producer_of (a_out, "input", a, a_in, &a_pad) !=
+      producer_of (b_out, "input", b, b_in, &b_pad) || a_pad != b_pad)
+    return FALSE;
+
+  for (la = a, lb = b; la && lb; la = la->next, lb = lb->next)
+    {
+      GeglNode *na = la->data, *nb = lb->data;
+      gchar   **pads;
+      gboolean  same = TRUE;
+      gint      i;
+
+      if (g_strcmp0 (gegl_node_get_operation (na), gegl_node_get_operation (nb)) != 0)
+        return FALSE;
+      pads = gegl_node_list_input_pads (na);
+      for (i = 0; same && pads && pads[i]; i++)
+        same = producer_of (na, pads[i], a, a_in, &a_pad) ==
+               producer_of (nb, pads[i], b, b_in, &b_pad) && a_pad == b_pad;
+      g_strfreev (pads);
+      if (! same)
+        return FALSE;
+    }
+  return TRUE;
+}
+
+static gboolean
+same_value (const GValue *a,
+            const GValue *b,
+            GParamSpec   *pspec)
+{
+  if (G_VALUE_HOLDS (a, GEGL_TYPE_COLOR))
+    {
+      GeglColor *ca = g_value_get_object (a), *cb = g_value_get_object (b);
+      gdouble    va[4], vb[4];
+
+      if (ca == NULL || cb == NULL)
+        return ca == cb;
+      gegl_color_get_rgba (ca, &va[0], &va[1], &va[2], &va[3]);
+      gegl_color_get_rgba (cb, &vb[0], &vb[1], &vb[2], &vb[3]);
+      return memcmp (va, vb, sizeof va) == 0;
+    }
+  if (G_VALUE_HOLDS (a, G_TYPE_OBJECT) || G_VALUE_HOLDS (a, G_TYPE_POINTER))
+    /* (curves, paths, buffers: not compared, set again) */
+    return g_value_get_object (a) == g_value_get_object (b);
+  return g_param_values_cmp (pspec, a, b) == 0;
+}
+
+/* sets the values of the nodes in from on the nodes in to, where they
+ * differ; returns how many were set */
+static gint
+copy_values (GSList *from,
+             GSList *to)
+{
+  gint n_set = 0;
+
+  for (; from && to; from = from->next, to = to->next)
+    {
+      GeglNode    *src = from->data, *dst = to->data;
+      GParamSpec **pspecs;
+      guint        n, i;
+
+      pspecs = gegl_operation_list_properties (gegl_node_get_operation (src), &n);
+      for (i = 0; i < n; i++)
+        {
+          GValue a = G_VALUE_INIT, b = G_VALUE_INIT;
+
+          if ((pspecs[i]->flags & G_PARAM_READWRITE) != G_PARAM_READWRITE ||
+              (pspecs[i]->flags & G_PARAM_CONSTRUCT_ONLY))
+            continue;
+          g_value_init (&a, pspecs[i]->value_type);
+          g_value_init (&b, pspecs[i]->value_type);
+          gegl_node_get_property (src, pspecs[i]->name, &a);
+          gegl_node_get_property (dst, pspecs[i]->name, &b);
+          if (! same_value (&a, &b, pspecs[i]))
+            {
+              gegl_node_set_property (dst, pspecs[i]->name, &a);
+              n_set++;
+            }
+          g_value_unset (&a);
+          g_value_unset (&b);
+        }
+      g_free (pspecs);
+    }
+  return n_set;
 }
 
 /* unlinks the nodes of the graph (but the proxies) and keeps them in
@@ -191,6 +346,8 @@ unlink_graph (GeglNode *gegl,
   state->stale = NULL;
 
   gegl_node_link_many (input, output, NULL);
+  g_slist_free_full (state->nodes, g_object_unref);
+  state->nodes = NULL;
 
   children = gegl_node_get_children (gegl);
   for (l = children; l; l = l->next)
@@ -216,6 +373,7 @@ prepare (GeglOperation *operation)
   GeglProperties *o    = GEGL_PROPERTIES (operation);
   GeglNode       *gegl = operation->node;
   GeglNode       *input, *output;
+  GeglNode       *scratch = NULL;
   State          *state;
   gdouble         rel_dim;
   gchar          *why;
@@ -232,23 +390,48 @@ prepare (GeglOperation *operation)
 
   input  = gegl_node_get_input_proxy (gegl, "input");
   output = gegl_node_get_output_proxy (gegl, "output");
-  unlink_graph (gegl, state);
-
   rel_dim = gegl_node_get_bounding_box (input).height;
-  why = check (o->string, rel_dim);
+
+  why = check (o->string, rel_dim, &scratch);
   if (why == NULL)
     {
-      GError *error = NULL;
+      GSList *wanted = graph_nodes (scratch, NULL);
 
-      gegl_create_chain (o->string, input, output, 0.0, rel_dim, NULL, &error);
-      if (error)
+      if (state->nodes && same_shape (scratch, wanted, gegl, state->nodes))
         {
-          why = g_strdup (error->message);
-          g_clear_error (&error);
-          /* nothing half built: the input as it is */
-          unlink_graph (gegl, state);
+          /* the same graph but for values: set those */
+          copy_values (wanted, state->nodes);
         }
+      else
+        {
+          GError *error = NULL;
+
+          unlink_graph (gegl, state);
+          gegl_create_chain (o->string, input, output, 0.0, rel_dim, NULL, &error);
+          if (error)
+            {
+              why = g_strdup (error->message);
+              g_clear_error (&error);
+              /* nothing half built: the input as it is */
+              unlink_graph (gegl, state);
+            }
+          else
+            {
+              GSList *l;
+
+              state->nodes = graph_nodes (gegl, state->stale);
+              /* each node keeps its result: GEGL by itself does so only
+               * for some operations, and a value changed late in the
+               * graph would otherwise compute all of it again */
+              for (l = state->nodes; l; l = l->next)
+                g_object_set (l->data, "cache-policy", GEGL_CACHE_POLICY_ALWAYS, NULL);
+            }
+        }
+      g_slist_free_full (wanted, g_object_unref);
+      g_object_unref (scratch);
     }
+  else
+    unlink_graph (gegl, state);
 
   /* (set only when it changes: setting it notifies) */
   if (g_strcmp0 (o->error, why ? why : "") != 0)
@@ -277,6 +460,7 @@ dispose (GObject *object)
     {
       g_free (state->string);
       g_slist_free_full (state->stale, g_object_unref);
+      g_slist_free_full (state->nodes, g_object_unref);
       g_free (state);
       o->user_data = NULL;
     }

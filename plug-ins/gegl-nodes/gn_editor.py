@@ -31,6 +31,17 @@ COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6
 # the frame (and left parts of it behind when a node moved).
 _CSS = b"""
 .gegl-nodes-node { background-color: transparent; background-image: none; }
+/* the Layer and Output nodes: a bold title and a badge in the color of
+   their socket */
+.gegl-nodes-end expander title label { font-weight: bold; }
+.gegl-nodes-badge {
+    font-size: smaller; font-weight: bold; border-radius: 3px;
+    padding: 1px 6px; margin: 2px 0; color: #202020;
+}
+.gegl-nodes-layer .gegl-nodes-badge { background-color: #6cc06c; }
+.gegl-nodes-output .gegl-nodes-badge { background-color: #5aa0d8; }
+.gegl-nodes-layer expander title label { color: #8ad88a; }
+.gegl-nodes-output expander title label { color: #84bfec; }
 /* the row of categories: menu labels, not buttons */
 .gegl-nodes-categories flowboxchild { padding: 0; }
 .gegl-nodes-categories button {
@@ -77,6 +88,16 @@ def _default_hex(pspec):
     return _hex((_to_srgb(r), _to_srgb(g), _to_srgb(b), a))
 
 
+def _no_icon(node):
+    """No delete button on the node. Needs GtkNodes with
+    sandbranch/gtknodes fix/icon-nullable (its introspection data refused
+    None before); without it, the button stays."""
+    try:
+        node.set_icon_name(None)
+    except TypeError:
+        pass
+
+
 class _Node(GtkNodes.Node):
     """A node of the editor: gn_id is its id in the graph, gn_sinks its
     input sockets by pad."""
@@ -92,6 +113,19 @@ class _Node(GtkNodes.Node):
         _style(self)
         for signal in ("node-socket-connect", "node-socket-disconnect"):
             self.connect(signal, lambda *a: editor.changed())
+
+    def mark_end(self, kind):
+        """The Layer and Output nodes: tinted, with a bold title, and no
+        delete button (they are always there)."""
+        _no_icon(self)
+        context = self.get_style_context()
+        context.add_class("gegl-nodes-end")
+        context.add_class("gegl-nodes-" + kind)
+        badge = Gtk.Label(label="IMAGE IN" if kind == "layer" else "SHOWN", xalign=0.5)
+        badge.get_style_context().add_class("gegl-nodes-badge")
+        self.item_add(badge, GtkNodes.NodeSocketIO.DISABLE)
+        self.set_tooltip_text("The layer as it is: where the graph starts" if kind == "layer"
+                              else "What the layer shows: the end of the graph")
 
     def add_sink(self, pad):
         label = Gtk.Label(label=pad.capitalize() if pad != "input" else "Input", xalign=0.0)
@@ -247,6 +281,10 @@ class GraphEditor(Gtk.Box):
         self._add_at = None
         add.set_popup(self._menu())
         bar.pack_start(add, False, False, 0)
+        arrange = Gtk.Button(label="Arrange", tooltip_text="Lay the nodes out from the layer "
+                             "to the output, in columns")
+        arrange.connect("clicked", lambda b: self.arrange())
+        bar.pack_start(arrange, False, False, 0)
         bar.pack_start(self.search, False, False, 0)
         self.status = Gtk.Label(xalign=0.0, ellipsize=3)
         bar.pack_start(self.status, True, True, 0)
@@ -465,9 +503,11 @@ class GraphEditor(Gtk.Box):
         for node_id, spec in graph["nodes"].items():
             if node_id == G.LAYER:
                 node = _Node(self, node_id, "Layer")
+                node.mark_end("layer")
                 node.add_source()
             elif node_id == G.OUTPUT:
                 node = _Node(self, node_id, "Output")
+                node.mark_end("output")
                 node.add_sink("input")
             else:
                 info = gn_ops.catalog().get(spec["op"])
@@ -498,6 +538,80 @@ class GraphEditor(Gtk.Box):
                 if source is not None and getattr(source, "gn_node", None) in self.nodes:
                     graph["links"].append({"from": source.gn_node, "to": node_id, "pad": pad})
         return graph
+
+    # automatic layout
+
+    GAP_X, GAP_Y, TOP, LEFT = 60, 24, 20, 20
+
+    def _size(self, node):
+        w, h = node.get_allocated_width(), node.get_allocated_height()
+        if w <= 1 or h <= 1:
+            w, h = node.get_preferred_width()[1], node.get_preferred_height()[1]
+        return w, h
+
+    def arrange(self):
+        """Places the nodes in columns: each node to the right of all the
+        nodes that feed it, the layer first and the output last; within a
+        column, each node as near the height of what feeds it as there is
+        room for, in the order that crosses the fewest links."""
+        graph = self.graph()
+        feeds = {k: [] for k in self.nodes}  # node: the nodes feeding it
+        for link in graph["links"]:
+            if link["from"] in feeds and link["to"] in feeds:
+                feeds[link["to"]].append(link["from"])
+        column = {}
+
+        def col(k, depth=0):
+            if k not in column:
+                if depth > len(self.nodes):  # a loop
+                    return 0
+                column[k] = 1 + max((col(f, depth + 1) for f in feeds[k]), default=-1)
+            return column[k]
+        for k in self.nodes:
+            col(k)
+        column[G.LAYER] = 0
+        last = max([c for k, c in column.items() if k != G.OUTPUT] + [0]) + 1
+        if G.OUTPUT in column:
+            column[G.OUTPUT] = max(last, column[G.OUTPUT])
+        columns = {}
+        for k in sorted(self.nodes, key=lambda k: self.view.child_get_property(self.nodes[k], "y")):
+            columns.setdefault(column[k], []).append(k)
+
+        size = {k: self._size(n) for k, n in self.nodes.items()}
+        place = {}
+        x = self.LEFT
+        for c in sorted(columns):
+            keys = columns[c]
+
+            def wanted(k):
+                ys = [place[f][1] + size[f][1] / 2 for f in feeds[k] if f in place]
+                return sum(ys) / len(ys) - size[k][1] / 2 if ys else None
+            # nodes fed from above first, unfed ones after, in their order
+            keys.sort(key=lambda k: (wanted(k) is None, wanted(k) or 0))
+            # a link that passes this column (from a column before it to
+            # one after it) keeps its lane: the nodes here go below it
+            y = self.TOP
+            for k2, fs in feeds.items():
+                if column[k2] > c:
+                    for f in fs:
+                        if f in place and column[f] < c:
+                            y = max(y, place[f][1] + size[f][1] + self.GAP_Y)
+            for k in keys:
+                w = wanted(k)
+                y = max(y, int(w) if w is not None else y)
+                place[k] = (x, y)
+                y += size[k][1] + self.GAP_Y
+            x += max(size[k][0] for k in keys) + self.GAP_X
+
+        self._loading = True
+        for k, (x, y) in place.items():
+            self.view.child_set_property(self.nodes[k], "x", int(x))
+            self.view.child_set_property(self.nodes[k], "y", int(y))
+        self._loading = False
+        self.view.queue_resize()
+        self.view.queue_draw()
+        self.emit("moved")
+        return place
 
     # what a user does, also for the tests
 

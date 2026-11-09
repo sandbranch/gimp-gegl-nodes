@@ -260,5 +260,41 @@ check("gaussian-blur: one input, editable std-dev-x and abyss-policy",
       blur.inputs == ["input"] and {"std-dev-x", "abyss-policy"} <= {p.name for p in blur.props})
 check("multiply: input and aux", cat["gegl:multiply"].inputs == ["input", "aux"])
 
+# --- changes of values only: the nodes stay, only the values are set
+def glow(blur, bright, color="#ff8000", link_aux=True):
+    nodes = {"blur": ("gegl:gaussian-blur", {"std-dev-x": blur, "std-dev-y": blur}),
+             "bc": ("gegl:brightness-contrast", {"brightness": bright}),
+             "tint": ("gegl:color-overlay", {"value": color}),
+             "mul": ("gegl:multiply", {})}
+    links = [("layer", "blur", "input"), ("blur", "bc", "input"), ("bc", "tint", "input"),
+             ("tint", "mul", "input"), ("mul", "output", "input")]
+    if link_aux:
+        links.append(("layer", "mul", "aux"))
+    return graph(nodes, links)
+
+
+parent = Gegl.Node()
+live = parent.create_child(G.GRAPH_OP)
+source(parent).link(live)
+steps = [("first", glow(3.0, 0.1), None),
+         ("a value after the blur", glow(3.0, 0.3), True),
+         ("a color", glow(3.0, 0.3, "#2060c0"), True),
+         ("the blur itself", glow(5.0, 0.3, "#2060c0"), True),
+         ("a link taken away", glow(5.0, 0.3, "#2060c0", False), False),
+         ("the link back", glow(5.0, 0.3, "#2060c0"), False)]
+before = None
+for what, g, kept in steps:
+    live.set_property("string", G.serialize(g))
+    got = pixels(live)
+    # (the wrappers are held, so that the same GEGL node gives the same one)
+    now = [c for c in live.get_children() if c.get_operation() != "gegl:nop"]
+    if kept is not None:
+        same = len(now) == len(before) and all(any(a is b for b in before) for a in now)
+        check("changed %s: the nodes are %s" % (what, "kept" if kept else "made anew"),
+              same == kept, G.serialize(g))
+    check("changed %s: the graph's pixels" % (what if kept is not None else "nothing yet"),
+          got == direct(g), G.serialize(g))
+    before = now
+
 print("unit failures: %d" % failures)
 sys.exit(1 if failures else 0)
