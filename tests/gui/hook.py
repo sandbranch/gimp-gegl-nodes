@@ -72,9 +72,10 @@ def _step1():
     # vignette
     n = e.nodes["output"]
     e._loading = True
-    e.view.child_set_property(n, "x", 1240)
-    e.view.child_set_property(n, "y", 20)
-    e.view.child_set_property(e.nodes["layer"], "y", 20)
+    # (on the canvas, the graph's 0, 0 is at e.origin)
+    e.view.child_set_property(n, "x", e.origin[0] + 1240)
+    e.view.child_set_property(n, "y", e.origin[1] + 20)
+    e.view.child_set_property(e.nodes["layer"], "y", e.origin[1] + 20)
     e._loading = False
     blur = e.add_op("gegl:gaussian-blur", 150, 150)
     screen = e.add_op("svg:screen", 560, 20)
@@ -96,8 +97,9 @@ def _step1():
 def _check1():
     e = session.editor  # noqa: F821
     # placed, read back, and drawn there
-    places = {k: (e.view.child_get_property(n, "x"), e.view.child_get_property(n, "y"),
-                  n.get_allocation().x, n.get_allocation().y)
+    ox, oy = e.origin
+    places = {k: (e.view.child_get_property(n, "x") - ox, e.view.child_get_property(n, "y") - oy,
+                  n.get_allocation().x - ox, n.get_allocation().y - oy)
               for k, n in e.nodes.items()}
     _check("the nodes are where they were put (GtkNodes with fix/child-y)",
            all(places[k] == xy * 2 for k, xy in _state["places"].items()), places)

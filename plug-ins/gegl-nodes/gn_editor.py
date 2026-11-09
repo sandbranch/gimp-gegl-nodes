@@ -27,6 +27,7 @@ IMAGE_KEY = 1  # all sockets carry images: any output fits any input
 ZOOMS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5)
 GRID = 20  # the canvas grid at zoom 1, a stronger line every fifth
 SOCKET_RADIUS = 8.0  # GtkNodes' own
+SELECTED = (0.96, 0.63, 0.20)  # the outline of a selected node, as Blender's
 COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6cc06c"}
 
 
@@ -374,9 +375,19 @@ class GraphEditor(Gtk.Box):
         add.set_popup(self._menu())
         bar.pack_start(add, False, False, 0)
         arrange = _icon_button(Gtk.Button, "Arrange", "gimp-tool-align",
-                               "Lay the nodes out from the layer to the output, in columns")
-        arrange.connect("clicked", lambda b: self.arrange())
+                               "Lay the nodes out from the layer to the output, in columns "
+                               "(only the selected ones, when two or more are)")
+        arrange.connect("clicked", lambda b: self.arrange(
+            self.selection if len(self.selection) > 1 else None))
         bar.pack_start(arrange, False, False, 0)
+        self.snap = True
+        snap = _icon_button(Gtk.ToggleButton, "Snap", "gimp-grid",
+                            "Snap the nodes to the grid when they are moved, added or "
+                            "arranged")
+        snap.set_active(True)
+        snap.connect("toggled", lambda b: setattr(self, "snap", b.get_active()))
+        self.snap_button = snap
+        bar.pack_start(snap, False, False, 0)
         self.setups_button = _icon_button(Gtk.MenuButton, "Setups", "document-save",
                                           "Save this graph as a setup, or use a saved one")
         self.setups_button.set_popup(Gtk.Menu())
@@ -413,19 +424,32 @@ class GraphEditor(Gtk.Box):
         self.zoom = 1.0
         self.setups_dir = setups_dir or default_setups_dir()
         self._pan = None
+        self.selection = set()  # ids of the selected nodes
+        # where the graph's 0, 0 is on the canvas: the canvas reaches a
+        # window's size past the nodes on every side, and grows (see
+        # _fit_canvas), so the nodes can go anywhere
+        self.origin = [0, 0]
+        self._view_set = False  # the view not yet put on the nodes
+        self._box = None  # a box being drawn to select: x0, y0, x1, y1, adding
+        self._drag = None  # a node dragged: its id, and where all were then
+        self._moving = False
         self.view = GtkNodes.NodeView()
-        self.view.connect("node-drag-end", lambda *a: self.emit("moved"))
+        self.view.connect("node-drag-begin", self._drag_begin)
+        self.view.connect("node-drag-end", self._drag_end)
         self.view.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+                             | Gdk.EventMask.BUTTON1_MOTION_MASK
                              | Gdk.EventMask.BUTTON2_MOTION_MASK)
         self.view.connect("button-press-event", self._pressed)
         self.view.connect("button-release-event", self._released)
-        self.view.connect("motion-notify-event", self._panning)
-        # (before GtkNodes draws the links and the nodes)
+        self.view.connect("motion-notify-event", self._motion)
+        # (before GtkNodes draws the links and the nodes, and after)
         self.view.connect("draw", self._draw_canvas)
+        self.view.connect_after("draw", self._draw_selection)
         self.connect("hierarchy-changed", self._toplevel)
         self.scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         self.scroller.add(self.view)
         self.scroller.connect("scroll-event", self._scrolled)
+        self.scroller.connect("size-allocate", lambda *a: self._fit_canvas())
         self.pack_start(self.scroller, True, True, 0)
         _zoom_css(self, self.zoom)
         self.load(graph or G.new_graph())
@@ -486,6 +510,8 @@ class GraphEditor(Gtk.Box):
         else:
             step = 40 + 30 * (len(self.nodes) % 8)
             x, y = 240 + step, 20 + step
+        if self.snap:
+            x, y = self.snapped(x), self.snapped(y)
         self.add_op(name, x, y)
 
     @staticmethod
@@ -559,19 +585,24 @@ class GraphEditor(Gtk.Box):
         a = self.view.get_allocation()
         return x - a.x, y - a.y
 
-    def _on_node(self, x, y):
-        for node in self.nodes.values():
+    def _node_at(self, x, y):
+        """The id of the node at x, y on the canvas, or None."""
+        for node_id, node in self.nodes.items():
             nx = self.view.child_get_property(node, "x")
             ny = self.view.child_get_property(node, "y")
             if nx <= x < nx + node.get_allocated_width() and \
                ny <= y < ny + node.get_allocated_height():
-                return True
-        return False
+                return node_id
+        return None
+
+    def _on_node(self, x, y):
+        return self._node_at(x, y) is not None
 
     def popup_add(self, event=None):
         """The Add menu at the pointer; the node goes where the pointer is."""
         x, y = self._pointer()
-        self._add_at = (max(0, x - 20) / self.zoom, max(0, y - 10) / self.zoom)
+        self._add_at = ((x - 20 - self.origin[0]) / self.zoom,
+                        (y - 10 - self.origin[1]) / self.zoom)
         self._popup.popup_at_pointer(event)
 
     def _pressed(self, view, event):
@@ -581,13 +612,25 @@ class GraphEditor(Gtk.Box):
                          self.scroller.get_vadjustment().get_value())
             return True
         x, y = self._pointer()
-        if self._on_node(x, y):
-            return False
-        # a click on the canvas takes the keys from the search field (for
-        # Shift+A), as in Blender
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
+        # a click on the canvas or a node's frame takes the keys from the
+        # search field (for Shift+A, Delete, ...), as in Blender
         top = self.get_toplevel()
         if isinstance(top, Gtk.Window):
             top.set_focus(None)
+        on = self._node_at(x, y)
+        if on is not None:
+            if event.button == Gdk.BUTTON_PRIMARY:
+                # (GtkNodes has begun dragging the node already; the drag
+                # takes the selection as it is after this)
+                if shift:
+                    self.select([on], toggle=True)
+                elif on not in self.selection:
+                    self.select([on])
+            return False
+        if event.button == Gdk.BUTTON_PRIMARY:
+            self._box = [x, y, x, y, shift]
+            return True
         if event.button != Gdk.BUTTON_SECONDARY:
             return False
         self.popup_add(event)
@@ -597,14 +640,172 @@ class GraphEditor(Gtk.Box):
         if event.button == Gdk.BUTTON_MIDDLE and self._pan:
             self._pan = None
             return True
+        if event.button == Gdk.BUTTON_PRIMARY and self._box:
+            x0, y0, x1, y1, adding = self._box
+            self._box = None
+            self.box_select(x0, y0, x1, y1, adding)
+            return True
         return False
 
-    def _panning(self, view, event):
-        if not self._pan:
+    def _motion(self, view, event):
+        if self._pan:
+            x0, y0, h, v = self._pan
+            self.scroller.get_hadjustment().set_value(h - (event.x_root - x0))
+            self.scroller.get_vadjustment().set_value(v - (event.y_root - y0))
+            return True
+        if self._box:
+            self._box[2], self._box[3] = self._pointer()
+            self.view.queue_draw()
+            return True
+        return False
+
+    # selection
+
+    def select(self, ids, add=False, toggle=False):
+        """Selects the nodes ids: instead of the selection, added to it,
+        or each one in or out of it."""
+        ids = [k for k in ids if k in self.nodes]
+        if toggle:
+            self.selection ^= set(ids)
+        elif add:
+            self.selection |= set(ids)
+        else:
+            self.selection = set(ids)
+        self.view.queue_draw()
+        n = len(self.selection)
+        self.say("%d nodes selected" % n if n > 1 else "")
+
+    def box_select(self, x0, y0, x1, y1, add=False):
+        """Selects the nodes the box (on the canvas, at the zoom) touches.
+        A click without a box clears the selection (unless adding)."""
+        left, right = sorted((x0, x1))
+        top, bottom = sorted((y0, y1))
+        hit = []
+        for node_id, node in self.nodes.items():
+            nx = self.view.child_get_property(node, "x")
+            ny = self.view.child_get_property(node, "y")
+            w, h = self._size(node)
+            if nx < right and left < nx + w and ny < bottom and top < ny + h:
+                hit.append(node_id)
+        self.select(hit, add=add)
+
+    def _drag_begin(self, view, node):
+        self._drag = (node.gn_id, {k: (self.view.child_get_property(n, "x"),
+                                       self.view.child_get_property(n, "y"))
+                                   for k, n in self.nodes.items()})
+
+    def _dragged(self, node, pspec):
+        """While a selected node is dragged, the others selected move with
+        it (GtkNodes moves only the one dragged)."""
+        if self._moving or not self._drag or node.gn_id != self._drag[0]:
+            return
+        # near the right or bottom end of the canvas: it grows (GtkNodes
+        # keeps a node inside the canvas); the left and top grow when the
+        # drag ends
+        w, h = self.view.get_size_request()
+        x = self.view.child_get_property(node, "x") + node.get_allocated_width()
+        y = self.view.child_get_property(node, "y") + node.get_allocated_height()
+        if x > w - 40 or y > h - 40:
+            self.view.set_size_request(max(w, x + 400), max(h, y + 400))
+        if self.snap:
+            x, y = self.view.child_get_property(node, "x"), self.view.child_get_property(node, "y")
+            z, (ox, oy) = self.zoom, self.origin
+            wx, wy = self.snapped((x - ox) / z), self.snapped((y - oy) / z)
+            sx, sy = int(round(wx * z)) + ox, int(round(wy * z)) + oy
+            # (the place in the graph kept exactly: from the canvas at
+            # other zooms than 1 it would come back rounded)
+            node.gn_pos = [float(wx), float(wy)]
+            if (sx, sy) != (x, y):
+                # (GtkNodes places the node from the pointer at each move,
+                # not from where it is, so this does not add up)
+                self._moving = True
+                self.view.child_set_property(node, "x", sx)
+                self.view.child_set_property(node, "y", sy)
+                self._moving = False
+        if node.gn_id not in self.selection:
+            return
+        start = self._drag[1]
+        dx = self.view.child_get_property(node, "x") - start[node.gn_id][0]
+        dy = self.view.child_get_property(node, "y") - start[node.gn_id][1]
+        self._moving = True
+        for k in self.selection:
+            if k != node.gn_id and k in self.nodes and k in start:
+                other = self.nodes[k]
+                self.view.child_set_property(other, "x", start[k][0] + dx)
+                self.view.child_set_property(other, "y", start[k][1] + dy)
+        self._moving = False
+
+    def _drag_end(self, view, node):
+        self._drag = None
+        self._fit_canvas()
+        self.emit("moved")
+
+    def _draw_selection(self, view, cr):
+        """The outlines of the selected nodes and the box being drawn, over
+        the nodes."""
+        cr.save()
+        cr.set_line_width(2)
+        cr.set_source_rgb(*SELECTED)
+        r = SOCKET_RADIUS * self.zoom
+        for k in self.selection:
+            node = self.nodes.get(k)
+            if node is None:
+                continue
+            x = self.view.child_get_property(node, "x") + r - 1
+            y = self.view.child_get_property(node, "y") + r - 1
+            w, h = node.get_allocated_width() - 2 * r + 2, node.get_allocated_height() - 2 * r + 2
+            if w > 0 and h > 0:
+                cr.rectangle(x, y, w, h)
+        cr.stroke()
+        if self._box:
+            x0, y0, x1, y1, _ = self._box
+            cr.rectangle(min(x0, x1) + 0.5, min(y0, y1) + 0.5, abs(x1 - x0), abs(y1 - y0))
+            cr.set_source_rgba(SELECTED[0], SELECTED[1], SELECTED[2], 0.12)
+            cr.fill_preserve()
+            cr.set_line_width(1)
+            cr.set_source_rgba(SELECTED[0], SELECTED[1], SELECTED[2], 0.8)
+            cr.stroke()
+        cr.restore()
+        return False
+
+    def delete_selected(self):
+        """Removes the selected nodes (never the layer or the output)."""
+        gone = [k for k in self.selection if k not in (G.LAYER, G.OUTPUT)]
+        for k in gone:
+            node = self.nodes.pop(k, None)
+            if node is not None:
+                self._drop(node)
+        self.selection -= set(gone)
+        self.view.queue_draw()
+        if gone:
+            self.changed()
+            self.say("%d removed" % len(gone) if len(gone) > 1 else "")
+        return gone
+
+    def duplicate_selected(self):
+        """Copies of the selected nodes, offset a little, with their values
+        and the links between them; the copies become the selection."""
+        ids = [k for k in self.selection if k not in (G.LAYER, G.OUTPUT)]
+        if not ids:
+            return []
+        graph, copies = G.duplicate(self.graph(), ids, 40, 40)
+        self.load(graph)
+        self.select(copies)
+        self.changed()
+        return copies
+
+    def save_selection(self, name):
+        """Saves only the selected nodes as a setup (see G.subgraph)."""
+        ids = [k for k in self.selection if k not in (G.LAYER, G.OUTPUT)]
+        if not ids:
+            self.say("Not saved: no nodes selected")
             return False
-        x0, y0, h, v = self._pan
-        self.scroller.get_hadjustment().set_value(h - (event.x_root - x0))
-        self.scroller.get_vadjustment().set_value(v - (event.y_root - y0))
+        try:
+            G.save_setup(self.setups_dir, name, G.subgraph(self.graph(), ids))
+        except (G.GraphError, OSError) as e:
+            self.say("Not saved: %s" % e)
+            return False
+        self.say("Saved %d nodes as setup %s" % (len(ids), name.strip()))
         return True
 
     def _scrolled(self, scroller, event):
@@ -638,7 +839,8 @@ class GraphEditor(Gtk.Box):
         if around is None:
             around = (h.get_value() + h.get_page_size() / 2, v.get_value() + v.get_page_size() / 2)
         on_screen = (around[0] - h.get_value(), around[1] - v.get_value())
-        ratio = zoom / self.zoom
+        # (the point in the graph's coordinates)
+        at = ((around[0] - self.origin[0]) / self.zoom, (around[1] - self.origin[1]) / self.zoom)
         for node in self.nodes.values():
             self._world(node)
         self.zoom = zoom
@@ -649,43 +851,114 @@ class GraphEditor(Gtk.Box):
             self._show_at(node)
         self._loading = False
         self.zoom_label.set_label("%d%%" % round(zoom * 100))
+        self._fit_canvas(scroll=False)
         self.view.queue_resize()
         self.view.queue_draw()
-
-        def keep():
-            h.set_value(around[0] * ratio - on_screen[0])
-            v.set_value(around[1] * ratio - on_screen[1])
-            return False
-        GLib.idle_add(keep)
+        self._scroll_to(at[0] * zoom + self.origin[0] - on_screen[0],
+                        at[1] * zoom + self.origin[1] - on_screen[1])
 
     def zoom_to_fit(self):
         """The largest zoom that shows all the nodes, at most 100%."""
         if not self.nodes:
             return
-        right = bottom = 0
+        left, top, right, bottom = self._extent()
+        h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
+        fits = min(h.get_page_size() / (right - left + 40), v.get_page_size() / (bottom - top + 40),
+                   1.0)
+        zoom = max([z for z in ZOOMS if z <= fits] or [ZOOMS[0]])
+        self.set_zoom(zoom)
+        self.show_nodes()
+
+    def _extent(self):
+        """left, top, right, bottom of the nodes, in the graph's
+        coordinates."""
+        boxes = []
         for node in self.nodes.values():
             w, h = self._size(node)
             x, y = self._world(node)
-            right = max(right, x + w / self.zoom)
-            bottom = max(bottom, y + h / self.zoom)
+            boxes.append((x, y, x + w / self.zoom, y + h / self.zoom))
+        if not boxes:
+            return 0, 0, 0, 0
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+    def _scroll_to(self, x, y):
         h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
-        fits = min(h.get_page_size() / (right + 20), v.get_page_size() / (bottom + 20), 1.0)
-        zoom = max([z for z in ZOOMS if z <= fits] or [ZOOMS[0]])
-        self.set_zoom(zoom, around=(0, 0))
-        GLib.idle_add(lambda: (h.set_value(0), v.set_value(0)) and False)
+
+        def go():
+            h.set_value(x)
+            v.set_value(y)
+            return False
+        # (after the canvas has its new size)
+        GLib.idle_add(go, priority=GLib.PRIORITY_DEFAULT_IDLE + 10)
+
+    def show_nodes(self):
+        """Scrolls to the nodes: centred when they fit, else from their
+        top left."""
+        left, top, right, bottom = self._extent()
+        h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
+        z, (ox, oy) = self.zoom, self.origin
+        pw, ph = h.get_page_size(), v.get_page_size()
+        w, hh = (right - left) * z, (bottom - top) * z
+        x = left * z + ox - (pw - w) / 2 if w < pw else left * z + ox - 20
+        y = top * z + oy - (ph - hh) / 2 if hh < ph else top * z + oy - 20
+        self._scroll_to(x, y)
+
+    def _fit_canvas(self, scroll=True):
+        """Makes the canvas reach a window's size past the nodes on every
+        side. When it grows on the left or at the top, the nodes and the
+        view move with it, so nothing moves on screen."""
+        h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
+        pw, ph = max(h.get_page_size(), 300), max(v.get_page_size(), 200)
+        left, top, right, bottom = self._extent()
+        z = self.zoom
+        ox, oy = int(pw - left * z), int(ph - top * z)
+        dx, dy = ox - self.origin[0], oy - self.origin[1]
+        width, height = int((right - left) * z + 2 * pw), int((bottom - top) * z + 2 * ph)
+        if (dx, dy) != (0, 0):
+            for node in self.nodes.values():
+                self._world(node)
+            self.origin = [ox, oy]
+            self._loading = True
+            for node in self.nodes.values():
+                self._show_at(node)
+            self._loading = False
+            if scroll and self._view_set:
+                self._scroll_to(h.get_value() + dx, v.get_value() + dy)
+        if self.view.get_size_request() != (width, height):
+            self.view.set_size_request(width, height)
+        if not self._view_set and h.get_page_size() > 1:
+            self._view_set = True
+            self.show_nodes()
+
+    @staticmethod
+    def snapped(v, up=False):
+        """A place in the graph with the node's frame on the grid (the
+        frame is a socket radius inside the node)."""
+        r = SOCKET_RADIUS
+        f = math.ceil if up else round
+        return int(f((v + r) / GRID) * GRID - r)
+
+    def _shown(self, node):
+        """Where the node goes on the canvas."""
+        return (int(round(node.gn_pos[0] * self.zoom)) + self.origin[0],
+                int(round(node.gn_pos[1] * self.zoom)) + self.origin[1])
 
     def _show_at(self, node):
-        self.view.child_set_property(node, "x", int(round(node.gn_pos[0] * self.zoom)))
-        self.view.child_set_property(node, "y", int(round(node.gn_pos[1] * self.zoom)))
+        x, y = self._shown(node)
+        self.view.child_set_property(node, "x", x)
+        self.view.child_set_property(node, "y", y)
 
     def _world(self, node):
-        """Where the node is at zoom 1: kept, unless it was dragged since."""
+        """Where the node is in the graph (at zoom 1): kept, unless it was
+        dragged since."""
         x = self.view.child_get_property(node, "x")
         y = self.view.child_get_property(node, "y")
-        if x != int(round(node.gn_pos[0] * self.zoom)):
-            node.gn_pos[0] = x / self.zoom
-        if y != int(round(node.gn_pos[1] * self.zoom)):
-            node.gn_pos[1] = y / self.zoom
+        sx, sy = self._shown(node)
+        if x != sx:
+            node.gn_pos[0] = (x - self.origin[0]) / self.zoom
+        if y != sy:
+            node.gn_pos[1] = (y - self.origin[1]) / self.zoom
         return int(round(node.gn_pos[0])), int(round(node.gn_pos[1]))
 
     # the canvas
@@ -704,19 +977,24 @@ class GraphEditor(Gtk.Box):
         cr.paint()
         step = GRID * self.zoom
         cr.set_line_width(1)
+        # (lines at the graph's own grid, wherever its 0, 0 is)
+        first_x, first_y = -math.floor(self.origin[0] / step), -math.floor(self.origin[1] / step)
         for major in (False, True):
             f = (0.78 if major else 0.88) if light else (0.66 if major else 0.82)
             cr.set_source_rgb(*(c * f for c in canvas))
-            i = 0
-            while i * step <= max(width, height):
+            i = first_x
+            while self.origin[0] + i * step <= width:
                 if (i % 5 == 0) == major:
-                    x = math.floor(i * step) + 0.5
-                    if x <= width:
-                        cr.move_to(x, 0)
-                        cr.line_to(x, height)
-                    if x <= height:
-                        cr.move_to(0, x)
-                        cr.line_to(width, x)
+                    x = math.floor(self.origin[0] + i * step) + 0.5
+                    cr.move_to(x, 0)
+                    cr.line_to(x, height)
+                i += 1
+            i = first_y
+            while self.origin[1] + i * step <= height:
+                if (i % 5 == 0) == major:
+                    y = math.floor(self.origin[1] + i * step) + 0.5
+                    cr.move_to(0, y)
+                    cr.line_to(width, y)
                 i += 1
             cr.stroke()
         cr.set_source_rgb(bg.red, bg.green, bg.blue)
@@ -749,6 +1027,11 @@ class GraphEditor(Gtk.Box):
         save = Gtk.MenuItem(label="Save Setup...")
         save.connect("activate", lambda i: self._ask_save())
         menu.append(save)
+        part = Gtk.MenuItem(label="Save Selection as Setup...")
+        part.set_tooltip_text("Only the selected nodes; what fed them comes from the layer")
+        part.set_sensitive(bool(self.selection - {G.LAYER, G.OUTPUT}))
+        part.connect("activate", lambda i: self._ask_save(selection=True))
+        menu.append(part)
         names = G.setups(self.setups_dir)
         if names:
             menu.append(Gtk.SeparatorMenuItem())
@@ -863,14 +1146,17 @@ class GraphEditor(Gtk.Box):
         dialog.destroy()
         return answer == Gtk.ResponseType.OK
 
-    def _ask_save(self):
-        name = self._ask_name("Save Setup", "Save")
+    def _ask_save(self, selection=False):
+        name = self._ask_name("Save Selection as Setup" if selection else "Save Setup", "Save")
         if not name:
             return
         if name in G.setups(self.setups_dir) and not self._confirm(
                 "There is a setup called %s already. Replace it?" % name, "Replace"):
             return
-        self.save_setup(name)
+        if selection:
+            self.save_selection(name)
+        else:
+            self.save_setup(name)
 
     def _ask_replace(self, name):
         if len(self.nodes) > 2 and not self._confirm(
@@ -906,11 +1192,27 @@ class GraphEditor(Gtk.Box):
             if event.keyval in (Gdk.KEY_0, Gdk.KEY_KP_0):
                 self.set_zoom(1.0)
                 return True
-        if isinstance(self.get_toplevel().get_focus(), Gtk.Editable):
+        focus = self.get_toplevel().get_focus()
+        if isinstance(focus, Gtk.Editable) or (
+                focus is not None and focus.get_ancestor(GtkNodes.Node) is not None):
+            # (typing in a node's field, or a node's widget has the keys)
             return False
-        if event.keyval == Gdk.KEY_A or (event.keyval == Gdk.KEY_a and
-                                         event.state & Gdk.ModifierType.SHIFT_MASK):
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        key = event.keyval
+        if key == Gdk.KEY_A or (key == Gdk.KEY_a and event.state & Gdk.ModifierType.SHIFT_MASK):
             self.popup_add(event)
+            return True
+        if ctrl and key in (Gdk.KEY_a, Gdk.KEY_A):
+            self.select(list(self.nodes))
+            return True
+        if ctrl and key in (Gdk.KEY_d, Gdk.KEY_D):
+            self.duplicate_selected()
+            return True
+        if not ctrl and key in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_x, Gdk.KEY_BackSpace):
+            self.delete_selected()
+            return True
+        if key == Gdk.KEY_Escape and self.selection:
+            self.select([])
             return True
         return False
 
@@ -931,6 +1233,8 @@ class GraphEditor(Gtk.Box):
         # otherwise redraw only the node's own area, and leave parts of
         # the old links on the canvas
         node.connect("size-allocate", lambda *a: self.view.queue_draw())
+        node.connect("notify::x", self._dragged)
+        node.connect("notify::y", self._dragged)
         self._show_at(node)
         node.show_all()
         self.nodes[node.gn_id] = node
@@ -975,7 +1279,9 @@ class GraphEditor(Gtk.Box):
             self._place(node, spec.get("x", 0), spec.get("y", 0))
         for link in graph["links"]:
             self._connect(link["from"], link["to"], link["pad"])
+        self.selection &= set(self.nodes)
         self._loading = False
+        self._fit_canvas()
 
     def _connect(self, src, dst, pad):
         if src in self.nodes and dst in self.nodes and pad in self.nodes[dst].gn_sinks:
@@ -1005,13 +1311,18 @@ class GraphEditor(Gtk.Box):
             w, h = node.get_preferred_width()[1], node.get_preferred_height()[1]
         return w, h
 
-    def arrange(self):
+    def arrange(self, only=None):
         """Places the nodes in columns: each node to the right of all the
         nodes that feed it, the layer first and the output last; within a
         column, each node as near the height of what feeds it as there is
-        room for, in the order that crosses the fewest links."""
+        room for, in the order that crosses the fewest links. With only
+        (ids), just those nodes, from where the top left one of them is;
+        the others stay where they are."""
         graph = self.graph()
-        feeds = {k: [] for k in self.nodes}  # node: the nodes feeding it
+        keys = [k for k in self.nodes if only is None or k in only]
+        if not keys:
+            return {}
+        feeds = {k: [] for k in keys}  # node: the nodes feeding it
         for link in graph["links"]:
             if link["from"] in feeds and link["to"] in feeds:
                 feeds[link["to"]].append(link["from"])
@@ -1023,21 +1334,29 @@ class GraphEditor(Gtk.Box):
                     return 0
                 column[k] = 1 + max((col(f, depth + 1) for f in feeds[k]), default=-1)
             return column[k]
-        for k in self.nodes:
+        for k in keys:
             col(k)
-        column[G.LAYER] = 0
+        if G.LAYER in column:
+            column[G.LAYER] = 0
         last = max([c for k, c in column.items() if k != G.OUTPUT] + [0]) + 1
         if G.OUTPUT in column:
             column[G.OUTPUT] = max(last, column[G.OUTPUT])
         columns = {}
-        for k in sorted(self.nodes, key=lambda k: self.view.child_get_property(self.nodes[k], "y")):
+        for k in sorted(keys, key=lambda k: self.view.child_get_property(self.nodes[k], "y")):
             columns.setdefault(column[k], []).append(k)
 
-        size = {k: self._size(n) for k, n in self.nodes.items()}
+        size = {k: self._size(self.nodes[k]) for k in keys}
         place = {}
         # (on screen, at the zoom)
         gap_x, gap_y = self.GAP_X * self.zoom, self.GAP_Y * self.zoom
-        x = self.LEFT
+        if only is None:
+            # (from where the graph's 0, 0 is)
+            left = self.origin[0] + self.LEFT * self.zoom
+            top = self.origin[1] + self.TOP * self.zoom
+        else:
+            left = min(self.view.child_get_property(self.nodes[k], "x") for k in keys)
+            top = min(self.view.child_get_property(self.nodes[k], "y") for k in keys)
+        x = left
         for c in sorted(columns):
             keys = columns[c]
 
@@ -1048,7 +1367,7 @@ class GraphEditor(Gtk.Box):
             keys.sort(key=lambda k: (wanted(k) is None, wanted(k) or 0))
             # a link that passes this column (from a column before it to
             # one after it) keeps its lane: the nodes here go below it
-            y = self.TOP
+            y = top
             for k2, fs in feeds.items():
                 if column[k2] > c:
                     for f in fs:
@@ -1063,13 +1382,20 @@ class GraphEditor(Gtk.Box):
 
         self._loading = True
         for k, (x, y) in place.items():
-            self.nodes[k].gn_pos = [x / self.zoom, y / self.zoom]
+            wx, wy = (x - self.origin[0]) / self.zoom, (y - self.origin[1]) / self.zoom
+            if self.snap:
+                # (up, never onto the gap: the gaps are wider than the grid)
+                wx, wy = self.snapped(wx, up=True), self.snapped(wy, up=True)
+            self.nodes[k].gn_pos = [wx, wy]
             self._show_at(self.nodes[k])
         self._loading = False
+        self._fit_canvas()
         self.view.queue_resize()
         self.view.queue_draw()
         self.emit("moved")
-        return place
+        # (where they are on the canvas now, which may have grown)
+        return {k: (self.view.child_get_property(self.nodes[k], "x"),
+                    self.view.child_get_property(self.nodes[k], "y")) for k in place}
 
     # what a user does, also for the tests
 
@@ -1080,6 +1406,7 @@ class GraphEditor(Gtk.Box):
             return None
         node_id = G.new_id(self.graph())
         self._place(_OpNode(self, node_id, info, {}), x, y)
+        self._fit_canvas()
         self.changed()
         return node_id
 
@@ -1097,4 +1424,5 @@ class GraphEditor(Gtk.Box):
         if node is not None:
             self._drop(node)
             del self.nodes[node_id]
+            self.selection.discard(node_id)
             self.changed()

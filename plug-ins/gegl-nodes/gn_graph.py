@@ -139,6 +139,62 @@ def insert(graph, setup, gap=60):
     return graph
 
 
+def duplicate(graph, ids, dx=40, dy=40):
+    """The graph with copies of the nodes ids (not the layer or the
+    output), offset by dx, dy, and the links between them copied too
+    (not their links to the other nodes); and the copies' ids."""
+    graph = json.loads(json.dumps(graph))
+    copies = {}
+    for old in sorted(ids):
+        if old in (LAYER, OUTPUT) or old not in graph["nodes"]:
+            continue
+        copies[old] = new_id(graph)
+        spec = json.loads(json.dumps(graph["nodes"][old]))
+        spec["x"] = spec.get("x", 0) + dx
+        spec["y"] = spec.get("y", 0) + dy
+        graph["nodes"][copies[old]] = spec
+    for link in list(graph["links"]):
+        if link["from"] in copies and link["to"] in copies:
+            graph["links"].append({"from": copies[link["from"]], "to": copies[link["to"]],
+                                   "pad": link["pad"]})
+    return graph, list(copies.values())
+
+
+def subgraph(graph, ids):
+    """The nodes ids as a graph of their own (to save as a setup): links
+    between them kept, links into them from other nodes coming from the
+    layer, and the one whose result went on (to another node or the
+    output; else the one that feeds none of the others; the rightmost
+    when there are several) going to the output."""
+    ids = [k for k in ids if k in graph["nodes"] and k not in (LAYER, OUTPUT)]
+    sub = new_graph()
+    sub["links"] = []
+    if not ids:
+        return sub
+    chosen = set(ids)
+    for k in ids:
+        sub["nodes"][k] = json.loads(json.dumps(graph["nodes"][k]))
+    out_of = set()
+    feeds_inside = set()
+    for link in graph["links"]:
+        f, t = link["from"], link["to"]
+        if t in chosen:
+            sub["links"].append({"from": f if f in chosen else LAYER, "to": t, "pad": link["pad"]})
+        if f in chosen and t in chosen:
+            feeds_inside.add(f)
+        elif f in chosen:
+            out_of.add(f)
+    ends = out_of or (chosen - feeds_inside)
+    if ends:
+        last = max(ends, key=lambda k: (graph["nodes"][k].get("x", 0), k))
+        sub["links"].append({"from": last, "to": OUTPUT, "pad": "input"})
+    xs = [graph["nodes"][k].get("x", 0) for k in ids]
+    ys = [graph["nodes"][k].get("y", 0) for k in ids]
+    sub["nodes"][LAYER].update(x=min(xs) - 200, y=min(ys))
+    sub["nodes"][OUTPUT].update(x=max(xs) + 300, y=min(ys))
+    return sub
+
+
 def new_id(graph):
     i = 1
     while "n%d" % i in graph["nodes"]:

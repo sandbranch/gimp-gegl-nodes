@@ -27,13 +27,29 @@ have no category; they are placed by words in their titles ("bevel",
 "glow", "noise"), and the rest go to Other. A group with fewer than three
 filters goes into Other too.
 
+**Selecting**: click a node to select it, Shift+click to add or take
+one out, or drag a box on the empty canvas (with Shift to add to the
+selection). Ctrl+A selects all, Escape none. Dragging a selected node
+moves all the selected ones. Delete, Backspace or X removes them (never
+the Layer or Output node), Ctrl+D duplicates them with their values and
+the links between them, and **Arrange** with two or more selected lays
+out only those.
+
+**Snap** (on by default) puts the frames of the nodes on the grid when
+they are dragged, added from the menus or arranged.
+
 **Zoom** with Ctrl+wheel, Ctrl+plus, Ctrl+minus and Ctrl+0, or the
 buttons on the right; the last one shows all the nodes. Drag with the
-middle button to move around the canvas.
+middle button to move around the canvas. The canvas reaches a window's
+size past the nodes on every side and grows as they move, so there is
+always room, also above and to the left of the layer.
 
 **Setups** saves the graph under a name, to use again on another layer:
 **Insert** adds a saved setup at the end of the graph, between what fed
-the output and the output; **Replace** shows it instead of the graph. A
+the output and the output; **Replace** shows it instead of the graph.
+**Save Selection as Setup** saves only the selected nodes: what fed them
+from outside comes from the setup's layer, and the node whose result went
+on goes to its output. A
 setup is a JSON file in `gegl-nodes/setups` in your GIMP profile folder
 (`~/.config/GIMP/3.2/`); copy, share or keep them in git as you like.
 
@@ -87,7 +103,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-142 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+165 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and
