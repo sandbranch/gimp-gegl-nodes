@@ -264,13 +264,20 @@ class _OpNode(_Node):
         self.gn_eye.set_focus_on_click(False)
         self.gn_eye.get_style_context().add_class("gegl-nodes-eye")
         self.gn_eye.connect("toggled", lambda b: editor._eye_toggled(self.gn_id, b))
-        title = Gtk.Box(spacing=4)
+        # (at the right end, next to the close button)
+        title = Gtk.Box(spacing=4, hexpand=True)
         title.pack_start(Gtk.Label(label=info.title), False, False, 0)
-        title.pack_start(self.gn_eye, False, False, 0)
+        title.pack_end(self.gn_eye, False, False, 0)
         title.show_all()
         expander = [c for c in self.get_children() if isinstance(c, Gtk.Expander)]
         if expander:
+            expander[0].set_label_fill(True)
             expander[0].set_label_widget(title)
+            # GtkExpander puts its own click window (which folds the node)
+            # over its title when it is shown, so the eye got no clicks: the
+            # title is put back once the expander is shown, and the eye's
+            # click window, made then, lies on top
+            expander[0].connect_after("map", lambda e: GLib.idle_add(self._title_on_top, e, title))
         else:  # (not as GtkNodes makes its nodes now; a row of its own)
             self.item_add(title, GtkNodes.NodeSocketIO.DISABLE)
         for pad in info.inputs:
@@ -290,6 +297,13 @@ class _OpNode(_Node):
                 self.gn_widgets[pspec.name] = widget
             self.item_add(grid, GtkNodes.NodeSocketIO.DISABLE)
         self.add_source()
+
+    @staticmethod
+    def _title_on_top(expander, title):
+        if expander.get_mapped() and expander.get_label_widget() is title:
+            expander.set_label_widget(None)
+            expander.set_label_widget(title)
+        return False
 
     def _set(self, name, value):
         self.gn_props[name] = value

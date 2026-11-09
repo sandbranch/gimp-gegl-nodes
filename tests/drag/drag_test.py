@@ -196,6 +196,39 @@ for how in ("click", "dclick"):
             "double click" if how == "dclick" else "click", " (node selected)" if selected else ""),
             spin.get_value() == 7.0 and blur in editor.nodes, (spin.get_value(), blur in editor.nodes))
 
+# the eye in a node's title: a click opens the preview, and does not fold
+# the node (the title's own click window once lay over the eye)
+editor.preview_source = lambda: None  # (only that it opens is checked)
+opened = []
+editor.preview = (lambda real: lambda node_id, show=True: opened.append((node_id, show)) or
+                  real(node_id, show))(editor.preview)
+fresh = editor.add_op("gegl:invert-gamma", 300, 400)
+pump(0.6)
+node = editor.nodes[fresh]
+expander = node.gn_eye.get_ancestor(Gtk.Expander)
+editor.scroller.get_hadjustment().set_value(node.get_property("x") - 300)
+editor.scroller.get_vadjustment().set_value(node.get_property("y") - 150)
+pump(0.4)
+x, y = node.gn_eye.translate_coordinates(win, node.gn_eye.get_allocated_width() // 2,
+                                         node.gn_eye.get_allocated_height() // 2)
+ox, oy = win.get_window().get_origin()[1:]
+run("click", ox + x, oy + y)
+check("a click on the eye in the title opens the preview, and does not fold the node",
+      (fresh, True) in opened and expander.get_expanded(), (opened, expander.get_expanded()))
+
+# the close button, next to the eye, still closes the node (GtkNodes
+# draws it 25 px from the node's right end, 10 px down, 20 px big)
+pump(0.3)
+a = node.get_allocation()
+r = int(gn_editor.SOCKET_RADIUS)
+x, y = node.translate_coordinates(win, a.width - r - 25 + 10, r + 10 + 10)
+ox, oy = win.get_window().get_origin()[1:]
+shot = os.environ.get("GN_DRAG_SHOT")
+if shot:
+    subprocess.call(["import", "-window", "root", shot.replace(".png", "-eye.png")])
+run("click", ox + x, oy + y)
+check("a click on the close button next to the eye removes the node", fresh not in editor.nodes)
+
 shot = os.environ.get("GN_DRAG_SHOT")
 if shot:
     subprocess.call(["import", "-window", "root", shot])

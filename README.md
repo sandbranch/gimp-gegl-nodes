@@ -35,8 +35,8 @@ the Layer or Output node), Ctrl+D duplicates them with their values and
 the links between them, and **Arrange** with two or more selected lays
 out only those.
 
-**Previews**: the eye in a node's title (or Ctrl+Shift+click on the
-node) opens a small window with the image as it comes out of that node:
+**Previews**: the eye in a node's title, next to its close button (or
+Ctrl+Shift+click on the node), opens a small window with the image as it comes out of that node:
 the layer's own pixels through the graph up to there, worked out at full
 size (so radii and distances are the layer's) and scaled to fit, in
 steps so that the editor stays responsive. It is worked out again after
@@ -111,7 +111,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-197 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+199 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, nodes dragged with real
 pointer events (XTest on Xvfb), headless GIMP
