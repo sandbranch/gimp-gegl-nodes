@@ -130,32 +130,20 @@ def _check2():
     _check("the layer follows (max difference %d)" % d, d <= 1 and px != _state["px1"])
     _check("the layer itself is not changed", drawable.get_buffer().get(  # noqa: F821
         _rect, 1.0, _FMT, Gegl.AbyssPolicy.NONE) == _state["original"])  # noqa: F821
-    # the image at a node: the blur alone, on the layer
-    e.view_node(_state["blur"])
-    _later(2500, _check3)
+    # a preview of the blur, from the layer's own pixels
+    _state["layer_px"] = px
+    _state["preview"] = e.preview(_state["blur"])
+    _later(3000, _check3)
 
 
 def _check3():
     e = session.editor  # noqa: F821
-    shown = _G.serialize(e.shown_graph())
-    got = session.filter.get_config().get_property("string")  # noqa: F821
-    _check("viewing a node: the filter runs the graph up to it", got == shown and
-           got != _G.serialize(e.graph()), got)
-    d = _maxdiff(_merged(), _render(shown))
-    _check("viewing a node: the layer shows its image (max difference %d)" % d, d <= 1)
-    _check("viewing a node: the layout keeps the whole graph",
-           _G.from_json(session.filter.get_config().get_property("layout"))["links"]  # noqa: F821
-           == e.graph()["links"])
-    e.view_node(None)
-    _later(2500, _check4)
-
-
-def _check4():
-    e = session.editor  # noqa: F821
-    want = _G.serialize(e.graph())
-    d = _maxdiff(_merged(), _render(want))
-    _check("the eye off: the layer shows the output again (max difference %d)" % d,
-           session.filter.get_config().get_property("string") == want and d <= 1)  # noqa: F821
+    win = _state["preview"]
+    _check("preview in GIMP: a window with the blur's image",
+           win is not None and win.pixels is not None and max(win.pixels[1], win.pixels[2]) <= 320,
+           win and win.pixels and win.pixels[1:])
+    _check("preview in GIMP: the layer still shows the whole graph", _merged() == _state["layer_px"])
+    # (left open for the screenshot; closing the editor closes it)
     Gimp.displays_flush()  # noqa: F821
     open(_os.path.join(_out, "ready"), "w").close()
     _state["waited"] = 0

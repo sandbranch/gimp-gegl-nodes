@@ -16,14 +16,16 @@ sys.path.insert(0, plugdir)
 
 import gi  # noqa: E402
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gegl", "0.4")
-from gi.repository import Gegl, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gegl, GLib, Gtk  # noqa: E402
 
 Gegl.init(None)
 
 import gn_editor  # noqa: E402
 import gn_graph as G  # noqa: E402
 import gn_ops  # noqa: E402
+import gn_preview  # noqa: E402
 
 failures = 0
 
@@ -370,45 +372,98 @@ check("arrange the selection: only those move",
                                   editor.view.child_get_property(editor.nodes[s3], "y")) == still)
 check("arrange the selection: left to right", place[s1][0] < place[s2][0])
 
-# showing the image at a node
+# previews: the image at a node, in a small window
+def checker():
+    parent = Gegl.Node()
+    board = parent.create_child("gegl:checkerboard")
+    board.set_property("x", 16)
+    board.set_property("y", 16)
+    crop = parent.create_child("gegl:crop")
+    crop.set_property("width", 400.0)
+    crop.set_property("height", 300.0)
+    buf = Gegl.Buffer.new("R'G'B'A u8", 0, 0, 400, 300)
+    write = parent.create_child("gegl:write-buffer")
+    write.set_property("buffer", buf)
+    board.link(crop)
+    crop.link(write)
+    write.process()
+    return buf
+
+
+layer_pixels = checker()
+editor.preview_source = lambda: layer_pixels
 editor.load(G.new_graph())
 pump()
-vb = editor.add_op("gegl:gaussian-blur", 250, 60)
-vi = editor.add_op("gegl:invert-gamma", 500, 60)
-editor.link("layer", vb)
-editor.link(vb, vi)
-editor.link(vi, "output")
+pb = editor.add_op("gegl:gaussian-blur", 250, 60)
+pi = editor.add_op("gegl:invert-gamma", 500, 60)
+editor.link("layer", pb)
+editor.link(pb, pi)
+editor.link(pi, "output")
+editor.set_value(pb, "std-dev-x", 6.0)
+editor.set_value(pb, "std-dev-y", 6.0)
 pump()
+
+
+def done(window):
+    end = GLib.get_monotonic_time() + 10000000
+    while window.busy() and GLib.get_monotonic_time() < end:
+        pump()
+    return window.pixels
+
+
 real = editor.graph()
-n = len(changes)
-editor.nodes[vb].gn_eye.set_active(True)  # as a click on its eye
+eye = editor.nodes[pb].gn_eye
+check("preview: the eye is in the node's title row",
+      eye.get_ancestor(Gtk.Expander) is not None)
+eye.set_active(True)  # as a click on it
 pump()
-shown = editor.shown_graph()
-check("view: the eye shows the node's image on the layer",
-      editor.viewing == vb and G.input_of(shown, "output", "input") == vb and
-      G.serialize(shown) == G.serialize({**real, "links": [l for l in real["links"]
-                                                            if l["to"] != "output"]
-                                         + [{"from": vb, "to": "output", "pad": "input"}]}))
-check("view: the graph itself does not change", editor.graph() == real)
-check("view: it is a change (the layer is updated)", len(changes) > n)
-check("view: the Output node says it is not shown",
-      editor.nodes["output"].gn_badge.get_text() == "NOT SHOWN" and
-      "after Gaussian Blur" in editor.status.get_text(), editor.status.get_text())
-editor.view_node(vi)
+win_b = editor.previews.get(pb)
+check("preview: the eye opens a window", win_b is not None and win_b.get_visible())
+px_b = done(win_b)
+check("preview: it shows an image, scaled to fit",
+      px_b is not None and max(px_b[1], px_b[2]) <= gn_preview.SIZE and
+      (px_b[1], px_b[2]) == (320, 240), px_b and px_b[1:])
+check("preview: the graph does not change", editor.graph() == real)
+win_i = editor.preview(pi)
+px_i = done(win_i)
+check("preview: two at once, each its own node's image", px_i[0] != px_b[0] and
+      len(editor.previews) == 2)
+editor.set_value(pb, "std-dev-x", 1.0)
+editor.set_value(pb, "std-dev-y", 1.0)
 pump()
-check("view: one node at a time (the other eye goes off)",
-      editor.nodes[vi].gn_eye.get_active() and not editor.nodes[vb].gn_eye.get_active())
-editor.nodes[vi].gn_eye.set_active(False)
+px_b2 = done(win_b)
+check("preview: worked out again after a change", px_b2[0] != px_b[0])
+
+
+def render_to(node_id):
+    # the same, worked out here at full size and scaled the same way
+    parent = Gegl.Node()
+    src = parent.create_child("gegl:buffer-source")
+    src.set_property("buffer", layer_pixels)
+    end = G.build(gn_preview.ending_at(editor.graph(), node_id), parent, src)
+    scale = parent.create_child("gegl:scale-ratio")
+    scale.set_property("x", 0.8)
+    scale.set_property("y", 0.8)
+    buf = Gegl.Buffer.new("R'G'B'A u8", 0, 0, 320, 240)
+    write = parent.create_child("gegl:write-buffer")
+    write.set_property("buffer", buf)
+    end.link(scale)
+    scale.link(write)
+    write.process()
+    return buf.get(Gegl.Rectangle.new(0, 0, 320, 240), 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+
+
+ref = render_to(pb)
+check("preview: its pixels are the node's image",
+      max(abs(a - b) for a, b in zip(ref, px_b2[0])) <= 2)
+win_b.emit("delete-event", Gdk.Event.new(Gdk.EventType.DELETE))
+win_b.destroy()
 pump()
-check("view: the eye off shows the output again",
-      editor.viewing is None and editor.shown_graph() == editor.graph() and
-      editor.nodes["output"].gn_badge.get_text() == "SHOWN")
-editor.view_node(vb)
-editor.remove(vb)
+check("preview: closing the window turns the eye off",
+      pb not in editor.previews and not editor.nodes[pb].gn_eye.get_active())
+editor.remove(pi)
 pump()
-check("view: removing the viewed node shows the output", editor.viewing is None)
-editor.view_node("layer")
-check("view: not the layer or the output", editor.viewing is None)
+check("preview: removing the node closes its preview", pi not in editor.previews)
 
 # snap to the grid
 G_ = gn_editor.GRID

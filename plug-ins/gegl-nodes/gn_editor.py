@@ -21,6 +21,7 @@ from gi.repository import Gdk, Gegl, GLib, GObject, Gtk, GtkNodes, Pango  # noqa
 
 import gn_graph as G  # noqa: E402
 import gn_ops  # noqa: E402
+import gn_preview  # noqa: E402
 
 IMAGE_KEY = 1  # all sockets carry images: any output fits any input
 # zoom levels; 1 is the theme's own size
@@ -28,7 +29,6 @@ ZOOMS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5)
 GRID = 20  # the canvas grid at zoom 1, a stronger line every fifth
 SOCKET_RADIUS = 8.0  # GtkNodes' own
 SELECTED = (0.96, 0.63, 0.20)  # the outline of a selected node, as Blender's
-VIEWED = (0.35, 0.63, 0.85)  # the outline of the node shown on the layer
 COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6cc06c"}
 
 
@@ -47,8 +47,7 @@ _CSS = b"""
 }
 .gegl-nodes-layer .gegl-nodes-badge { background-color: #6cc06c; }
 .gegl-nodes-output .gegl-nodes-badge { background-color: #5aa0d8; }
-.gegl-nodes-output .gegl-nodes-badge.gegl-nodes-off { background-color: #8a8a8a; }
-.gegl-nodes-eye { padding: 0 4px; min-height: 0; min-width: 0; }
+.gegl-nodes-eye { padding: 0 2px; min-height: 0; min-width: 0; margin: 0; }
 .gegl-nodes-layer expander title label { color: #8ad88a; }
 .gegl-nodes-output expander title label { color: #84bfec; }
 /* the row of categories: menu labels, not buttons */
@@ -250,17 +249,30 @@ class _OpNode(_Node):
         self.gn_widgets = {}
         self.set_tooltip_text("%s\n%s" % (info.name, info.description))
         self.connect("node-func-clicked", lambda node: editor.remove(node.gn_id))
-        # the eye: the layer shows the image as it comes out of this node
+        # the eye, in the title row: a small window with the image as it
+        # comes out of this node
         self.gn_eye = _icon_button(Gtk.ToggleButton, None, "gimp-visible",
-                                   "Show the image at this node on the layer, instead of "
-                                   "the output (Ctrl+Shift+click on the node)")
+                                   "Preview: the image as it comes out of this node, in a "
+                                   "small window (Ctrl+Shift+click on the node)")
         if not self.gn_eye.get_child().get_children():
-            self.gn_eye.get_child().add(Gtk.Label(label="Show"))
-        self.gn_eye.set_halign(Gtk.Align.START)
+            self.gn_eye.get_child().add(Gtk.Label(label="Preview"))
         self.gn_eye.set_relief(Gtk.ReliefStyle.NONE)
+        self.gn_eye_image = next((c for c in self.gn_eye.get_child().get_children()
+                                  if isinstance(c, Gtk.Image)), None)
+        if self.gn_eye_image is not None:
+            self.gn_eye_image.set_pixel_size(round(16 * editor.zoom))
+        self.gn_eye.set_focus_on_click(False)
         self.gn_eye.get_style_context().add_class("gegl-nodes-eye")
         self.gn_eye.connect("toggled", lambda b: editor._eye_toggled(self.gn_id, b))
-        self.item_add(self.gn_eye, GtkNodes.NodeSocketIO.DISABLE)
+        title = Gtk.Box(spacing=4)
+        title.pack_start(Gtk.Label(label=info.title), False, False, 0)
+        title.pack_start(self.gn_eye, False, False, 0)
+        title.show_all()
+        expander = [c for c in self.get_children() if isinstance(c, Gtk.Expander)]
+        if expander:
+            expander[0].set_label_widget(title)
+        else:  # (not as GtkNodes makes its nodes now; a row of its own)
+            self.item_add(title, GtkNodes.NodeSocketIO.DISABLE)
         for pad in info.inputs:
             self.add_sink(pad)
         if info.props:
@@ -452,7 +464,10 @@ class GraphEditor(Gtk.Box):
         self.setups_dir = setups_dir or default_setups_dir()
         self._pan = None
         self.selection = set()  # ids of the selected nodes
-        self.viewing = None  # the node whose image the layer shows, if not the output
+        self.previews = {}  # node id: its preview window
+        # the layer's pixels for the previews (a GeglBuffer), from the
+        # plug-in; None: no previews
+        self.preview_source = None
         self._eyes_setting = False
         # where the graph's 0, 0 is on the canvas: the canvas reaches a
         # window's size past the nodes on every side, and grows (see
@@ -666,8 +681,7 @@ class GraphEditor(Gtk.Box):
         both = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
         if on is not None and event.button == Gdk.BUTTON_PRIMARY and \
                 event.state & both == both:
-            # as Blender's viewer: the layer shows this node's image
-            self.view_node(None if on == self.viewing else on)
+            self.preview(on, on not in self.previews)
             return False
         if on is not None:
             if event.button == Gdk.BUTTON_PRIMARY:
@@ -709,45 +723,42 @@ class GraphEditor(Gtk.Box):
             return True
         return False
 
-    # showing the image at a node
+    # previews: the image at a node, in a small window
 
-    def view_node(self, node_id):
-        """Makes the layer show the image as it comes out of node_id (not
-        the layer or the output), or with None, the output again. The
-        graph itself does not change: see shown_graph()."""
-        if node_id in (G.LAYER, G.OUTPUT) or node_id not in self.nodes:
-            node_id = None
-        changed = node_id != self.viewing
-        self.viewing = node_id
-        self._eyes_setting = True
-        for k, n in self.nodes.items():
-            eye = getattr(n, "gn_eye", None)
-            if eye is not None and eye.get_active() != (k == node_id):
-                eye.set_active(k == node_id)
-        self._eyes_setting = False
-        out = self.nodes.get(G.OUTPUT)
-        if out is not None and getattr(out, "gn_badge", None) is not None:
-            out.gn_badge.set_text("NOT SHOWN" if node_id else "SHOWN")
-            context = out.gn_badge.get_style_context()
-            (context.add_class if node_id else context.remove_class)("gegl-nodes-off")
-        self.view.queue_draw()
-        self.say("")
-        if changed:
-            self.changed()
+    def preview(self, node_id, show=True):
+        """Opens (or with show False, closes) the preview of node_id."""
+        node = self.nodes.get(node_id)
+        if show and (node is None or not hasattr(node, "gn_eye")):
+            return None
+        if not show:
+            window = self.previews.pop(node_id, None)
+            if window is not None:
+                window.destroy()
+        elif node_id not in self.previews:
+            if self.preview_source is None:
+                self.say("No previews here: no image")
+            else:
+                top = self.get_toplevel()
+                self.previews[node_id] = gn_preview.Preview(
+                    node.gn_title, node_id, self.preview_source, self.graph,
+                    lambda: self.preview(node_id, False),
+                    top if isinstance(top, Gtk.Window) else None)
+        if node is not None and hasattr(node, "gn_eye"):
+            self._eyes_setting = True
+            node.gn_eye.set_active(node_id in self.previews)
+            self._eyes_setting = False
+        return self.previews.get(node_id)
 
     def _eye_toggled(self, node_id, button):
-        if self._eyes_setting:
-            return
-        self.view_node(node_id if button.get_active() else None)
+        if not self._eyes_setting:
+            self.preview(node_id, button.get_active())
 
-    def shown_graph(self):
-        """The graph that the layer shows: the graph, or while a node is
-        viewed, the graph with that node's result going to the output."""
-        graph = self.graph()
-        if self.viewing in graph["nodes"]:
-            graph["links"] = [link for link in graph["links"] if link["to"] != G.OUTPUT]
-            graph["links"].append({"from": self.viewing, "to": G.OUTPUT, "pad": "input"})
-        return graph
+    def _update_previews(self):
+        for node_id in list(self.previews):
+            if node_id in self.nodes:
+                self.previews[node_id].update()
+            else:
+                self.preview(node_id, False)
 
     # selection
 
@@ -860,13 +871,6 @@ class GraphEditor(Gtk.Box):
             if w > 0 and h > 0:
                 cr.rectangle(x, y, w, h)
         cr.stroke()
-        viewed = self.nodes.get(self.viewing)
-        if viewed is not None:
-            a = viewed.get_allocation()
-            cr.set_line_width(3)
-            cr.set_source_rgb(*VIEWED)
-            cr.rectangle(a.x + r - 3, a.y + r - 3, a.width - 2 * r + 6, a.height - 2 * r + 6)
-            cr.stroke()
         if self._box:
             x0, y0, x1, y1, _ = self._box
             cr.rectangle(min(x0, x1) + 0.5, min(y0, y1) + 0.5, abs(x1 - x0), abs(y1 - y0))
@@ -886,8 +890,8 @@ class GraphEditor(Gtk.Box):
             if node is not None:
                 self._drop(node)
         self.selection -= set(gone)
-        if self.viewing in gone:
-            self.view_node(None)
+        for k in gone:
+            self.preview(k, False)
         self.view.queue_draw()
         if gone:
             self.changed()
@@ -963,6 +967,8 @@ class GraphEditor(Gtk.Box):
             node.set_socket_radius(SOCKET_RADIUS * zoom)
             if getattr(node, "gn_grid", None) is not None:
                 node.gn_grid.set_column_spacing(round(6 * zoom))
+            if getattr(node, "gn_eye_image", None) is not None:
+                node.gn_eye_image.set_pixel_size(round(16 * zoom))  # (icons do not follow the font)
             self._show_at(node)
             # a size dragged with the node's corner zooms too
             for prop in ("width", "height"):
@@ -1386,17 +1392,12 @@ class GraphEditor(Gtk.Box):
         return False
 
     def say(self, text):
-        """Shows text in the status line; with no text, what is shown on
-        the layer when that is a node's image."""
-        if not text and self.viewing in self.nodes:
-            node = self.nodes[self.viewing]
-            text = ("The layer shows the image after %s (its eye, or Ctrl+Shift+click, "
-                    "shows the output again)" % node.gn_title)
         self.status.set_text(text)
 
     def changed(self):
         if not self._loading:
             self.emit("changed")
+            self._update_previews()
 
     def _place(self, node, x, y):
         """Puts the node on the canvas at x, y (at zoom 1)."""
@@ -1460,7 +1461,15 @@ class GraphEditor(Gtk.Box):
             self._connect(link["from"], link["to"], link["pad"])
         self.selection &= set(self.nodes)
         self._loading = False
-        self.view_node(self.viewing if self.viewing in self.nodes else None)
+        # (previews of nodes still there go on, with new eyes)
+        for node_id in list(self.previews):
+            if node_id in self.nodes and hasattr(self.nodes[node_id], "gn_eye"):
+                self._eyes_setting = True
+                self.nodes[node_id].gn_eye.set_active(True)
+                self._eyes_setting = False
+                self.previews[node_id].update()
+            else:
+                self.preview(node_id, False)
         self._fit_canvas()
 
     def _connect(self, src, dst, pad):
@@ -1605,6 +1614,5 @@ class GraphEditor(Gtk.Box):
             self._drop(node)
             del self.nodes[node_id]
             self.selection.discard(node_id)
-            if node_id == self.viewing:
-                self.view_node(None)
+            self.preview(node_id, False)
             self.changed()

@@ -98,6 +98,9 @@ class Session:
         self.editor = gn_editor.GraphEditor(
             graph, setups_dir=os.path.join(Gimp.directory(), "gegl-nodes", "setups"))
         self.editor.say(first_error)
+        # the previews start from the layer's own pixels (without the
+        # filter), read when a preview is opened or worked out again
+        self.editor.preview_source = drawable.get_buffer
         self.editor.connect("changed", lambda e: self.later())
         self.editor.connect("moved", lambda e: self.later())
         self.window.add(self.editor)
@@ -118,9 +121,7 @@ class Session:
         G = self.G
         graph = self.editor.graph()
         try:
-            # (the image at a node, while one is viewed; the layout keeps
-            # the graph itself)
-            string = G.serialize(self.editor.shown_graph())
+            string = G.serialize(graph)
         except G.GraphError as e:
             self.editor.say(str(e))
             return False
@@ -135,9 +136,8 @@ class Session:
         return False
 
     def close(self, *args):
-        # the layer keeps the graph's result, not a node's viewed
-        if self.editor.viewing:
-            self.editor.view_node(None)
+        for node_id in list(self.editor.previews):
+            self.editor.preview(node_id, False)
         if self.pending:
             GLib.source_remove(self.pending)
             self.apply()
