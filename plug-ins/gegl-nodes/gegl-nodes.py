@@ -94,7 +94,9 @@ class Session:
         self.window = Gtk.Window(title="Node Editor: %s" % drawable.get_name())
         self.window.set_default_size(1100, 420)
         self.window.set_role("gegl-nodes")
-        self.editor = gn_editor.GraphEditor(graph)
+        # saved setups: in GIMP's profile folder, next to its own presets
+        self.editor = gn_editor.GraphEditor(
+            graph, setups_dir=os.path.join(Gimp.directory(), "gegl-nodes", "setups"))
         self.editor.say(first_error)
         self.editor.connect("changed", lambda e: self.later())
         self.editor.connect("moved", lambda e: self.later())

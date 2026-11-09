@@ -12,13 +12,30 @@ after saving and opening the XCF.
 *Filters > Generic > Node Editor...* The editor opens as its own window
 (see "Docked like Blender" below).
 
-To add a node: pick a filter from the menus along the top (one per GEGL
-category, on as many rows as the window's width needs), click **Add**,
-press **Shift+A** or right-click on the canvas (the node goes where you clicked), or type in the search
-field and press Enter. Link nodes by dragging from a green Output dot to
-an Input dot; the Output node's input is what the layer shows. The Layer
-and Output nodes have a bold title and a badge, and cannot be deleted.
-**Arrange** lays the nodes out in columns from the layer to the output.
+To add a node: pick a filter from the menus along the top, click
+**Add**, press **Shift+A** or right-click on the canvas (the node goes
+where you clicked), or type in the search field and press Enter. Link
+nodes by dragging from a green Output dot to an Input dot; the Output
+node's input is what the layer shows. The Layer and Output nodes have a
+bold title and a badge, and cannot be deleted. **Arrange** lays the
+nodes out in columns from the layer to the output.
+
+The menus put GEGL's categories together into about a dozen groups, as
+GIMP's Filters menu does (Blur, Sharpen & Denoise, Color, Blend, ...),
+with a heading for each category inside. Many third-party operations
+have no category; they are placed by words in their titles ("bevel",
+"glow", "noise"), and the rest go to Other. A group with fewer than three
+filters goes into Other too.
+
+**Zoom** with Ctrl+wheel, Ctrl+plus, Ctrl+minus and Ctrl+0, or the
+buttons on the right; the last one shows all the nodes. Drag with the
+middle button to move around the canvas.
+
+**Setups** saves the graph under a name, to use again on another layer:
+**Insert** adds a saved setup at the end of the graph, between what fed
+the output and the output; **Replace** shows it instead of the graph. A
+setup is a JSON file in `gegl-nodes/setups` in your GIMP profile folder
+(`~/.config/GIMP/3.2/`); copy, share or keep them in git as you like.
 
 ## What is in here
 
@@ -70,7 +87,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-110 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+142 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and
@@ -115,7 +132,30 @@ GIMP's theme gives every vertical box a background (`.vertical` in
 `themes/Default/common.css`). A GtkNodes node is a vertical box, so that
 background was painted over parts of the node's frame, and left bits of
 frames behind when a node moved. The editor makes its nodes' background
-transparent.
+transparent, and fills the nodes itself when it draws the canvas (darker
+than the theme's background, with a grid), under GtkNodes' frames.
+
+Themes such as Yaru round menus by 8 px while the menu's window stays
+square, and the window's fill showed at the corners; the editor's menus
+are square.
+
+## Starting quickly
+
+Reading an operation's input pads means making a node of it, and some
+third-party operations build a whole graph of their own when made
+(`lb:twirl` takes 0.2 s). With 348 operations installed, making them all
+took 1.3 s of the editor's start. The pads are now read when a node of
+the operation is first made, and the editor starts in about 0.3 s.
+
+## A PyGObject pitfall
+
+PyGObject (3.56 here) makes a Python class for an enum that has no
+introspection data, such as the enums of GEGL's operations, on the first
+`pspec.enum_class`, but keeps only a borrowed pointer to it: once the
+class is garbage collected, `enum_class` returns whatever Python object
+took its memory ("type object 'SpecialFileError' has no attribute
+'__enum_values__'"). `gn_graph.enum_values` holds every enum class for
+as long as the process runs.
 
 ## Docked like Blender
 

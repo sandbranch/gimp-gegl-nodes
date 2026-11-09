@@ -19,6 +19,7 @@
 # another; a pad has at most one link.
 
 import json
+import os
 import re
 
 import gi
@@ -57,6 +58,87 @@ def from_json(text):
     return graph
 
 
+# saved setups: a graph in a file of its own, to use again on another
+# layer (the editor's Setups menu)
+
+SETUP_SUFFIX = ".json"
+
+
+def setup_path(folder, name):
+    """The file of the setup called name. A name is a file name without
+    its suffix: no folders in it."""
+    name = name.strip()
+    if not name or name.startswith(".") or "/" in name or "\\" in name or "\0" in name:
+        raise GraphError("not a name for a setup: %r" % name)
+    return os.path.join(folder, name + SETUP_SUFFIX)
+
+
+def setups(folder):
+    """The names of the setups saved in folder, sorted."""
+    try:
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return []
+    return sorted((n[:-len(SETUP_SUFFIX)] for n in names
+                   if n.endswith(SETUP_SUFFIX) and not n.startswith(".")), key=str.lower)
+
+
+def save_setup(folder, name, graph):
+    """Saves the graph as a setup (written to a new file first, so a
+    failed save leaves an older setup of that name as it was)."""
+    path = setup_path(folder, name)
+    os.makedirs(folder, exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "w") as f:
+        # one value per line, so that setups kept in git diff well
+        json.dump(graph, f, sort_keys=True, indent=1)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def read_setup(folder, name):
+    try:
+        with open(setup_path(folder, name)) as f:
+            return from_json(f.read())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise GraphError("setup %s could not be read: %s" % (name, e)) from e
+
+
+def insert(graph, setup, gap=60):
+    """The graph with the setup added at its end: what fed the output now
+    feeds what the setup's layer fed, and the setup's result goes to the
+    output. The setup's nodes get new ids, and are placed to the right of
+    the graph's, with the output after them."""
+    graph = json.loads(json.dumps(graph))
+    nodes = graph["nodes"]
+    ids = {}
+    for node_id in setup["nodes"]:
+        if node_id not in (LAYER, OUTPUT):
+            ids[node_id] = new_id(graph)
+            nodes[ids[node_id]] = None  # (taken)
+    if not ids:
+        return graph
+    end = input_of(graph, OUTPUT, "input")
+    ours = [n for k, n in nodes.items() if n is not None and k != OUTPUT]
+    theirs = [setup["nodes"][k] for k in ids]
+    dx = max(n.get("x", 0) for n in ours) + 200 + gap - min(n.get("x", 0) for n in theirs)
+    dy = min(n.get("y", 0) for n in ours) - min(n.get("y", 0) for n in theirs)
+    for old, new in ids.items():
+        spec = json.loads(json.dumps(setup["nodes"][old]))
+        spec["x"] = spec.get("x", 0) + dx
+        spec["y"] = spec.get("y", 0) + dy
+        nodes[new] = spec
+    graph["links"] = [link for link in graph["links"] if link["to"] != OUTPUT]
+    for link in setup["links"]:
+        src = ids.get(link["from"], end if link["from"] == LAYER else None)
+        dst = OUTPUT if link["to"] == OUTPUT else ids.get(link["to"])
+        if src is not None and dst is not None:
+            graph["links"].append({"from": src, "to": dst, "pad": link["pad"]})
+    nodes[OUTPUT]["x"] = max(n["x"] for k, n in nodes.items() if k != OUTPUT) + 200 + gap
+    return graph
+
+
 def new_id(graph):
     i = 1
     while "n%d" % i in graph["nodes"]:
@@ -71,13 +153,31 @@ def input_of(graph, node_id, pad):
     return None
 
 
+# PyGObject (3.56 here) makes a Python class for an enum without
+# introspection data (GEGL's operations' own enums) on the first
+# pspec.enum_class, but keeps only a borrowed pointer to it on the GType:
+# once the class is garbage collected, enum_class returns whatever Python
+# object took its memory (seen as "type object 'SpecialFileError' has no
+# attribute '__enum_values__'"). So every enum class is held here, for as
+# long as the process runs, and taken only through enum_values().
+_enum_classes = {}
+
+
+def enum_values(pspec):
+    """{number: GEnumValue} of an enum property."""
+    name = pspec.value_type.name
+    if name not in _enum_classes:
+        _enum_classes[name] = pspec.enum_class
+    return _enum_classes[name].__enum_values__
+
+
 def set_value(node, pspec, value):
     """Sets a property of a GEGL node from its JSON form (enums by
     nick, colors as CSS strings)."""
     kind = pspec.__gtype__.name
     if kind == "GeglParamEnum" or kind == "GParamEnum":
         if isinstance(value, str):
-            values = pspec.enum_class.__enum_values__
+            values = enum_values(pspec)
             for number, ev in values.items():
                 if ev.value_nick == value:
                     value = number

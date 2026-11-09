@@ -128,7 +128,7 @@ check("the menu row has every offered filter once",
 check("the Add menu has the same categories", [i.get_label() for i in editor._popup.get_children()]
       == [b.get_label() for b in editor.category_buttons])
 before = set(editor.nodes)
-first = editor.category_buttons[0].get_popup().get_children()[0]
+first = [i for i in editor.category_buttons[0].get_popup().get_children() if hasattr(i, "gn_op")][0]
 first.activate()
 pump()
 check("a filter picked in the menu row is added", len(set(editor.nodes) - before) == 1)
@@ -175,6 +175,100 @@ check("arrange: the nodes are where it says",
       all((editor.view.child_get_property(editor.nodes[k], "x"),
            editor.view.child_get_property(editor.nodes[k], "y")) == p for k, p in place.items()))
 check("arrange: the graph is the same", G.serialize(editor.graph()) == string_before)
+
+# the menus: fewer, fuller groups
+groups = editor.groups()
+sizes = {t: len(ops) for t, ops in groups.items()}
+check("menus: at most 14, none with only one or two filters",
+      len(groups) <= 14 and min(sizes.values()) >= 3, sizes)
+check("menus: Opacity (category transparency) is under Color",
+      "gegl:opacity" in [i.name for i in groups.get("Color", [])])
+check("menus: the menus are square (no theme corners)",
+      editor._popup.get_style_context().has_class("gegl-nodes-menu"))
+
+# zoom: places scale on screen, the graph keeps them
+editor.load(G.new_graph())
+pump()
+zb = editor.add_op("gegl:gaussian-blur", 300, 100)
+editor.link("layer", zb)
+editor.link(zb, "output")
+pump()
+at1 = editor.graph()
+editor.set_zoom(0.5)
+pump()
+check("zoom: the places on screen are halved",
+      (editor.view.child_get_property(editor.nodes[zb], "x"),
+       editor.view.child_get_property(editor.nodes[zb], "y")) == (150, 50))
+check("zoom: the graph keeps its places and links", editor.graph() == at1)
+check("zoom: the label says 50%", editor.zoom_label.get_label() == "50%")
+editor.view.child_set_property(editor.nodes[zb], "x", 200)  # dragged at 50%
+check("zoom: a node dragged at 50% is placed at zoom 1",
+      editor.graph()["nodes"][zb]["x"] == 400)
+editor.set_zoom(1.0)
+pump()
+check("zoom: back at 100%", editor.view.child_get_property(editor.nodes[zb], "x") == 400
+      and editor.graph()["nodes"][zb]["y"] == 100)
+editor.zoom_step(1)
+check("zoom: a step in from 100%", editor.zoom > 1.0)
+editor.set_zoom(1.0)
+
+# saved setups
+import tempfile  # noqa: E402
+editor.setups_dir = tempfile.mkdtemp(prefix="gn-setups-")
+glow = G.new_graph()
+glow["nodes"]["n1"] = {"op": "gegl:gaussian-blur", "x": 200, "y": 160, "props": {"std-dev-x": 9.0}}
+glow["nodes"]["n2"] = {"op": "svg:screen", "x": 400, "y": 60, "props": {}}
+glow["links"] = [{"from": "layer", "to": "n1", "pad": "input"},
+                 {"from": "layer", "to": "n2", "pad": "input"},
+                 {"from": "n1", "to": "n2", "pad": "aux"},
+                 {"from": "n2", "to": "output", "pad": "input"}]
+editor.load(glow)
+pump()
+check("setups: saved", editor.save_setup("Soft glow") and
+      G.setups(editor.setups_dir) == ["Soft glow"])
+check("setups: a name with a folder in it is refused",
+      not editor.save_setup("../out") and G.setups(editor.setups_dir) == ["Soft glow"])
+editor.load(G.new_graph())
+pump()
+check("setups: Replace shows the setup",
+      editor.replace_with_setup("Soft glow") and
+      G.serialize(editor.graph()) == G.serialize(glow))
+editor.load(G.new_graph())
+pump()
+sharp = editor.add_op("gegl:unsharp-mask", 250, 60)
+editor.link("layer", sharp)
+editor.link(sharp, "output")
+pump()
+n = len(changes)
+editor.insert_setup("Soft glow")
+pump()
+g = editor.graph()
+ops = {k: v["op"] for k, v in g["nodes"].items()}
+blur_id = [k for k, o in ops.items() if o == "gegl:gaussian-blur"][0]
+screen_id = [k for k, o in ops.items() if o == "svg:screen"][0]
+links = sorted((l["from"], l["to"], l["pad"]) for l in g["links"])
+check("setups: Insert adds its nodes with new ids", len(g["nodes"]) == 5 and
+      sharp in g["nodes"] and len({sharp, blur_id, screen_id}) == 3)
+check("setups: Insert puts it at the end of the chain", links == sorted([
+    ("layer", sharp, "input"), (sharp, blur_id, "input"), (sharp, screen_id, "input"),
+    (blur_id, screen_id, "aux"), (screen_id, "output", "input")]), links)
+check("setups: Insert keeps its values", g["nodes"][blur_id]["props"] == {"std-dev-x": 9.0})
+check("setups: Insert is a change", len(changes) > n)
+check("setups: the output after the inserted nodes",
+      g["nodes"]["output"]["x"] > max(v["x"] for k, v in g["nodes"].items() if k != "output"))
+check("setups: renamed", editor.rename_setup("Soft glow", "Glow") and
+      G.setups(editor.setups_dir) == ["Glow"])
+check("setups: deleted", editor.delete_setup("Glow") and G.setups(editor.setups_dir) == [])
+open(os.path.join(editor.setups_dir, "Broken.json"), "w").write("{not json")
+before_broken = editor.graph()
+check("setups: a broken file is said, and nothing changes",
+      not editor.replace_with_setup("Broken") and "Broken" in editor.status.get_text()
+      and editor.graph() == before_broken)
+setups_menu = editor._setups_menu()  # (held: a menu let go of is emptied)
+labels = [i.get_label() for i in setups_menu.get_children()]
+check("setups: the menu lists them", "Broken" in labels, labels)
+editor.load(glow)
+editor.arrange()
 
 shot = os.environ.get("GN_SHOT")
 if shot:

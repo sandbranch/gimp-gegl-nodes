@@ -259,6 +259,32 @@ blur = cat["gegl:gaussian-blur"]
 check("gaussian-blur: one input, editable std-dev-x and abyss-policy",
       blur.inputs == ["input"] and {"std-dev-x", "abyss-policy"} <= {p.name for p in blur.props})
 check("multiply: input and aux", cat["gegl:multiply"].inputs == ["input", "aux"])
+check("every offered operation has an output (read lazily, after the start)",
+      all(info.usable() for info in cat.values()),
+      [n for n, info in cat.items() if not info.usable()][:5])
+grouped = [i.name for hs in gn_ops.groups(cat.values()).values() for ops in hs.values() for i in ops]
+check("every offered operation is in one menu", sorted(grouped) == sorted(cat))
+
+# --- saved setups (files)
+import tempfile  # noqa: E402
+sdir = os.path.join(tempfile.mkdtemp(prefix="gn-unit-"), "setups")
+for bad in ("", " ", "../x", "a/b", ".hidden"):
+    try:
+        G.setup_path(sdir, bad)
+        check("setup name refused: %r" % bad, False)
+    except G.GraphError:
+        check("setup name refused: %r" % bad, True)
+G.save_setup(sdir, "One", branchy)
+check("a setup reads back as saved", G.read_setup(sdir, "One") == branchy)
+check("no file is left half written", os.listdir(sdir) == ["One.json"])
+plain = G.new_graph()
+plain["links"] = []  # the output not linked
+ins = G.insert(plain, branchy)
+check("insert into a graph whose output is not linked: the setup's own links kept",
+      len(ins["nodes"]) == len(branchy["nodes"]) and
+      not any(link["from"] == "layer" for link in ins["links"]) and
+      any(link["to"] == "output" for link in ins["links"]))
+check("inserting an empty setup changes nothing", G.insert(branchy, G.new_graph()) == branchy)
 
 # --- changes of values only: the nodes stay, only the values are set
 def glow(blur, bright, color="#ff8000", link_aux=True):
