@@ -54,6 +54,17 @@ g = editor.graph()
 check("a new editor: layer to output", G.serialize(g) == "" and
       g["links"] == [{"from": "layer", "to": "output", "pad": "input"}], g)
 
+end = GLib.get_monotonic_time() + 800000
+while GLib.get_monotonic_time() < end:
+    pump()
+h, v = editor.scroller.get_hadjustment(), editor.scroller.get_vadjustment()
+check("on opening, the nodes are in view", all(
+    h.get_value() <= n.get_property("x") < h.get_value() + h.get_page_size() and
+    v.get_value() <= n.get_property("y") < v.get_value() + v.get_page_size()
+    for n in editor.nodes.values()),
+    (h.get_value(), v.get_value(), [(n.get_property("x"), n.get_property("y"))
+                                    for n in editor.nodes.values()]))
+
 blur = editor.add_op("gegl:gaussian-blur", 250, 40)
 inv = editor.add_op("gegl:invert-gamma", 250, 260)
 mul = editor.add_op("gegl:multiply", 500, 120)
@@ -215,6 +226,41 @@ editor.zoom_step(1)
 check("zoom: a step in from 100%", editor.zoom > 1.0)
 editor.set_zoom(1.0)
 
+# zoom sizes: nodes shrink with the zoom, do not run into each other,
+# and come back to their size (GtkNodes once kept sizes from halfway)
+editor.load(G.new_graph())
+pump()
+zb1 = editor.add_op("gegl:gaussian-blur", 200, 60)
+zb2 = editor.add_op("gegl:unsharp-mask", 500, 60)
+editor.link("layer", zb1)
+editor.link(zb1, zb2)
+editor.link(zb2, "output")
+editor.arrange()
+
+
+def settle():
+    end = GLib.get_monotonic_time() + 600000
+    while GLib.get_monotonic_time() < end:
+        pump()
+
+
+settle()
+size100 = {k: (n.get_allocated_width(), n.get_allocated_height()) for k, n in editor.nodes.items()}
+editor.set_zoom(0.5)
+settle()
+boxes50 = [(n.get_allocation().x, n.get_allocation().y, n.get_allocation().width,
+            n.get_allocation().height) for n in editor.nodes.values()]
+check("zoom 50%: the nodes are smaller",
+      all(n.get_allocated_width() < size100[k][0] for k, n in editor.nodes.items()))
+check("zoom 50%: no two nodes run into each other", not any(
+    a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+    for i, a in enumerate(boxes50) for b in boxes50[i + 1:]), boxes50)
+editor.set_zoom(1.0)
+settle()
+check("zoom back to 100%: the nodes have their sizes again",
+      {k: (n.get_allocated_width(), n.get_allocated_height()) for k, n in editor.nodes.items()}
+      == size100)
+
 # the canvas: room on every side, and it grows
 editor.load(G.new_graph())
 pump()
@@ -323,6 +369,46 @@ check("arrange the selection: only those move",
       set(place) == {s1, s2} and (editor.view.child_get_property(editor.nodes[s3], "x"),
                                   editor.view.child_get_property(editor.nodes[s3], "y")) == still)
 check("arrange the selection: left to right", place[s1][0] < place[s2][0])
+
+# showing the image at a node
+editor.load(G.new_graph())
+pump()
+vb = editor.add_op("gegl:gaussian-blur", 250, 60)
+vi = editor.add_op("gegl:invert-gamma", 500, 60)
+editor.link("layer", vb)
+editor.link(vb, vi)
+editor.link(vi, "output")
+pump()
+real = editor.graph()
+n = len(changes)
+editor.nodes[vb].gn_eye.set_active(True)  # as a click on its eye
+pump()
+shown = editor.shown_graph()
+check("view: the eye shows the node's image on the layer",
+      editor.viewing == vb and G.input_of(shown, "output", "input") == vb and
+      G.serialize(shown) == G.serialize({**real, "links": [l for l in real["links"]
+                                                            if l["to"] != "output"]
+                                         + [{"from": vb, "to": "output", "pad": "input"}]}))
+check("view: the graph itself does not change", editor.graph() == real)
+check("view: it is a change (the layer is updated)", len(changes) > n)
+check("view: the Output node says it is not shown",
+      editor.nodes["output"].gn_badge.get_text() == "NOT SHOWN" and
+      "after Gaussian Blur" in editor.status.get_text(), editor.status.get_text())
+editor.view_node(vi)
+pump()
+check("view: one node at a time (the other eye goes off)",
+      editor.nodes[vi].gn_eye.get_active() and not editor.nodes[vb].gn_eye.get_active())
+editor.nodes[vi].gn_eye.set_active(False)
+pump()
+check("view: the eye off shows the output again",
+      editor.viewing is None and editor.shown_graph() == editor.graph() and
+      editor.nodes["output"].gn_badge.get_text() == "SHOWN")
+editor.view_node(vb)
+editor.remove(vb)
+pump()
+check("view: removing the viewed node shows the output", editor.viewing is None)
+editor.view_node("layer")
+check("view: not the layer or the output", editor.viewing is None)
 
 # snap to the grid
 G_ = gn_editor.GRID

@@ -1,5 +1,6 @@
 # Real pointer events on an X display (XTest), from a process of its own:
 #   python3 pointer.py move X Y | press | release | drag X0 Y0 X1 Y1 STEPS
+#                      | click X Y | keys KEYSYM...  (e.g. keys 3 period 5 Return)
 #
 # Copyright 2026 David
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -17,6 +18,11 @@ xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_in
                                       ctypes.c_int, ctypes.c_ulong]
 xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int,
                                       ctypes.c_ulong]
+xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+x11.XStringToKeysym.argtypes = [ctypes.c_char_p]
+x11.XStringToKeysym.restype = ctypes.c_ulong
+x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+x11.XKeysymToKeycode.restype = ctypes.c_ubyte
 d = x11.XOpenDisplay(None)
 if not d:
     sys.exit("no X display")
@@ -32,6 +38,13 @@ def button(down, which=1):
     x11.XFlush(d)
 
 
+def key(name):
+    code = x11.XKeysymToKeycode(d, x11.XStringToKeysym(name.encode()))
+    xtst.XTestFakeKeyEvent(d, code, 1, 0)
+    xtst.XTestFakeKeyEvent(d, code, 0, 0)
+    x11.XFlush(d)
+
+
 cmd = sys.argv[1]
 if cmd == "move":
     move(*map(int, sys.argv[2:4]))
@@ -39,6 +52,18 @@ elif cmd == "press":
     button(True)
 elif cmd == "release":
     button(False)
+elif cmd == "click":
+    move(*map(int, sys.argv[2:4]))
+    time.sleep(0.15)
+    button(True)
+    time.sleep(0.05)
+    button(False)
+    time.sleep(0.3)
+elif cmd == "keys":
+    for name in sys.argv[2:]:
+        key(name)
+        time.sleep(0.05)
+    time.sleep(0.3)
 elif cmd == "drag":
     x0, y0, x1, y1, steps = map(int, sys.argv[2:7])
     move(x0, y0)

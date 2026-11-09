@@ -130,6 +130,32 @@ def _check2():
     _check("the layer follows (max difference %d)" % d, d <= 1 and px != _state["px1"])
     _check("the layer itself is not changed", drawable.get_buffer().get(  # noqa: F821
         _rect, 1.0, _FMT, Gegl.AbyssPolicy.NONE) == _state["original"])  # noqa: F821
+    # the image at a node: the blur alone, on the layer
+    e.view_node(_state["blur"])
+    _later(2500, _check3)
+
+
+def _check3():
+    e = session.editor  # noqa: F821
+    shown = _G.serialize(e.shown_graph())
+    got = session.filter.get_config().get_property("string")  # noqa: F821
+    _check("viewing a node: the filter runs the graph up to it", got == shown and
+           got != _G.serialize(e.graph()), got)
+    d = _maxdiff(_merged(), _render(shown))
+    _check("viewing a node: the layer shows its image (max difference %d)" % d, d <= 1)
+    _check("viewing a node: the layout keeps the whole graph",
+           _G.from_json(session.filter.get_config().get_property("layout"))["links"]  # noqa: F821
+           == e.graph()["links"])
+    e.view_node(None)
+    _later(2500, _check4)
+
+
+def _check4():
+    e = session.editor  # noqa: F821
+    want = _G.serialize(e.graph())
+    d = _maxdiff(_merged(), _render(want))
+    _check("the eye off: the layer shows the output again (max difference %d)" % d,
+           session.filter.get_config().get_property("string") == want and d <= 1)  # noqa: F821
     Gimp.displays_flush()  # noqa: F821
     open(_os.path.join(_out, "ready"), "w").close()
     _state["waited"] = 0

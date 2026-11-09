@@ -35,6 +35,12 @@ the Layer or Output node), Ctrl+D duplicates them with their values and
 the links between them, and **Arrange** with two or more selected lays
 out only those.
 
+**The image at any node**: click the eye under a node's title, or
+Ctrl+Shift+click the node, and the layer shows the image as it comes out
+of that node (as Blender's viewer). The node gets a blue outline and the
+Output node says NOT SHOWN; the eye again, or closing the editor, shows
+the output. The graph itself does not change.
+
 **Snap** (on by default) puts the frames of the nodes on the grid when
 they are dragged, added from the menus or arranged.
 
@@ -103,7 +109,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-178 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+194 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, nodes dragged with real
 pointer events (XTest on Xvfb), headless GIMP
@@ -148,6 +154,15 @@ for upstream:
   ran away from the pointer (a 90 px drag moved it 522 px on a large
   canvas). It now goes to its place at the start of the drag plus how
   far the pointer has moved on the screen.
+- `fix/size-request-in-allocate`: the view set its own size request at
+  the end of laying out, which GTK 3 does not allow for; it now gives
+  the extent of its nodes as its preferred size.
+
+The editor made the same mistake itself (it set the canvas size from
+the scroll area's size-allocate signal): GTK then dropped every later
+relayout of the canvas, so after a zoom the nodes kept sizes from
+halfway and ran into each other, until the window was resized. It now
+does that after the layout.
 
 GtkNodes' child properties `x` and `y` are not a plain read either: they
 copy the node's own `x` and `y` into GtkNodes' place for it, and read

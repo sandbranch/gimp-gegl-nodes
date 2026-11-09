@@ -118,7 +118,9 @@ class Session:
         G = self.G
         graph = self.editor.graph()
         try:
-            string = G.serialize(graph)
+            # (the image at a node, while one is viewed; the layout keeps
+            # the graph itself)
+            string = G.serialize(self.editor.shown_graph())
         except G.GraphError as e:
             self.editor.say(str(e))
             return False
@@ -133,6 +135,9 @@ class Session:
         return False
 
     def close(self, *args):
+        # the layer keeps the graph's result, not a node's viewed
+        if self.editor.viewing:
+            self.editor.view_node(None)
         if self.pending:
             GLib.source_remove(self.pending)
             self.apply()

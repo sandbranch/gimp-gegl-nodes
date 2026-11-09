@@ -28,6 +28,7 @@ ZOOMS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5)
 GRID = 20  # the canvas grid at zoom 1, a stronger line every fifth
 SOCKET_RADIUS = 8.0  # GtkNodes' own
 SELECTED = (0.96, 0.63, 0.20)  # the outline of a selected node, as Blender's
+VIEWED = (0.35, 0.63, 0.85)  # the outline of the node shown on the layer
 COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6cc06c"}
 
 
@@ -46,6 +47,8 @@ _CSS = b"""
 }
 .gegl-nodes-layer .gegl-nodes-badge { background-color: #6cc06c; }
 .gegl-nodes-output .gegl-nodes-badge { background-color: #5aa0d8; }
+.gegl-nodes-output .gegl-nodes-badge.gegl-nodes-off { background-color: #8a8a8a; }
+.gegl-nodes-eye { padding: 0 4px; min-height: 0; min-width: 0; }
 .gegl-nodes-layer expander title label { color: #8ad88a; }
 .gegl-nodes-output expander title label { color: #84bfec; }
 /* the row of categories: menu labels, not buttons */
@@ -107,8 +110,14 @@ def _zoom_css(widget, zoom):
                 " min-height: %dpx; padding-top: 0; padding-bottom: 0; }\n"
                 ".gegl-nodes-node spinbutton button { min-width: %dpx; padding: 0; }\n"
                 ".gegl-nodes-node check { min-width: %dpx; min-height: %dpx; }\n"
+                # (paddings too: they do not follow the font)
+                ".gegl-nodes-node entry, .gegl-nodes-node spinbutton entry"
+                " { padding-left: %dpx; padding-right: %dpx; min-width: 0; }\n"
+                ".gegl-nodes-node button, .gegl-nodes-node combobox button"
+                " { padding-left: %dpx; padding-right: %dpx; }\n"
                 % (max(h, 8), max(round(20 * zoom), 8), max(round(14 * zoom), 6),
-                   max(round(14 * zoom), 6)))
+                   max(round(14 * zoom), 6), round(8 * zoom), round(8 * zoom),
+                   round(6 * zoom), round(6 * zoom)))
     _zoom_provider.load_from_data(css.encode())
 
 
@@ -194,6 +203,7 @@ class _Node(GtkNodes.Node):
         self.gn_sinks = {}
         self.gn_source = None
         self.gn_pos = [0.0, 0.0]  # where the node is at zoom 1
+        self.gn_title = label
         self.set_label(label)
         _style(self)
         for signal in ("node-socket-connect", "node-socket-disconnect"):
@@ -209,6 +219,7 @@ class _Node(GtkNodes.Node):
         badge = Gtk.Label(label="IMAGE IN" if kind == "layer" else "SHOWN", xalign=0.5)
         badge.get_style_context().add_class("gegl-nodes-badge")
         self.item_add(badge, GtkNodes.NodeSocketIO.DISABLE)
+        self.gn_badge = badge
         self.set_tooltip_text("The layer as it is: where the graph starts" if kind == "layer"
                               else "What the layer shows: the end of the graph")
 
@@ -239,10 +250,23 @@ class _OpNode(_Node):
         self.gn_widgets = {}
         self.set_tooltip_text("%s\n%s" % (info.name, info.description))
         self.connect("node-func-clicked", lambda node: editor.remove(node.gn_id))
+        # the eye: the layer shows the image as it comes out of this node
+        self.gn_eye = _icon_button(Gtk.ToggleButton, None, "gimp-visible",
+                                   "Show the image at this node on the layer, instead of "
+                                   "the output (Ctrl+Shift+click on the node)")
+        if not self.gn_eye.get_child().get_children():
+            self.gn_eye.get_child().add(Gtk.Label(label="Show"))
+        self.gn_eye.set_halign(Gtk.Align.START)
+        self.gn_eye.set_relief(Gtk.ReliefStyle.NONE)
+        self.gn_eye.get_style_context().add_class("gegl-nodes-eye")
+        self.gn_eye.connect("toggled", lambda b: editor._eye_toggled(self.gn_id, b))
+        self.item_add(self.gn_eye, GtkNodes.NodeSocketIO.DISABLE)
         for pad in info.inputs:
             self.add_sink(pad)
         if info.props:
-            grid = Gtk.Grid(column_spacing=6, row_spacing=2, margin_top=4)
+            grid = Gtk.Grid(column_spacing=round(6 * editor.zoom), row_spacing=2,
+                            margin_top=4)
+            self.gn_grid = grid
             for row, pspec in enumerate(info.props):
                 widget = self._widget(pspec)
                 if widget is None:
@@ -390,8 +414,11 @@ class GraphEditor(Gtk.Box):
         bar.pack_start(snap, False, False, 0)
         self.setups_button = _icon_button(Gtk.MenuButton, "Setups", "document-save",
                                           "Save this graph as a setup, or use a saved one")
-        self.setups_button.set_popup(Gtk.Menu())
-        self.setups_button.connect("toggled", self._setups_opening)
+        # (one menu, filled again whenever the setups or the selection
+        # change: a menu made when the button is pressed came too late,
+        # GTK had shown the old one, empty, already)
+        self.setups_popup = _menu_widget()
+        self.setups_button.set_popup(self.setups_popup)
         bar.pack_start(self.setups_button, False, False, 0)
         bar.pack_start(self.search, False, False, 0)
         zoom_box = Gtk.Box()
@@ -425,6 +452,8 @@ class GraphEditor(Gtk.Box):
         self.setups_dir = setups_dir or default_setups_dir()
         self._pan = None
         self.selection = set()  # ids of the selected nodes
+        self.viewing = None  # the node whose image the layer shows, if not the output
+        self._eyes_setting = False
         # where the graph's 0, 0 is on the canvas: the canvas reaches a
         # window's size past the nodes on every side, and grows (see
         # _fit_canvas), so the nodes can go anywhere
@@ -449,10 +478,15 @@ class GraphEditor(Gtk.Box):
         self.scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         self.scroller.add(self.view)
         self.scroller.connect("scroll-event", self._scrolled)
-        self.scroller.connect("size-allocate", lambda *a: self._fit_canvas())
+        # (after the layout, not in it: setting the canvas's size request
+        # while GTK lays out made GTK drop every later relayout of the
+        # canvas, until the window was resized; nodes kept stale sizes)
+        self._fit_pending = 0
+        self.scroller.connect("size-allocate", lambda *a: self._fit_later())
         self.pack_start(self.scroller, True, True, 0)
         _zoom_css(self, self.zoom)
         self.load(graph or G.new_graph())
+        self._setups_menu()
 
     def _find(self, entry):
         for row in self.matches.get_children():
@@ -619,6 +653,12 @@ class GraphEditor(Gtk.Box):
         if isinstance(top, Gtk.Window):
             top.set_focus(None)
         on = self._node_at(x, y)
+        both = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
+        if on is not None and event.button == Gdk.BUTTON_PRIMARY and \
+                event.state & both == both:
+            # as Blender's viewer: the layer shows this node's image
+            self.view_node(None if on == self.viewing else on)
+            return False
         if on is not None:
             if event.button == Gdk.BUTTON_PRIMARY:
                 # (GtkNodes has begun dragging the node already; the drag
@@ -659,6 +699,46 @@ class GraphEditor(Gtk.Box):
             return True
         return False
 
+    # showing the image at a node
+
+    def view_node(self, node_id):
+        """Makes the layer show the image as it comes out of node_id (not
+        the layer or the output), or with None, the output again. The
+        graph itself does not change: see shown_graph()."""
+        if node_id in (G.LAYER, G.OUTPUT) or node_id not in self.nodes:
+            node_id = None
+        changed = node_id != self.viewing
+        self.viewing = node_id
+        self._eyes_setting = True
+        for k, n in self.nodes.items():
+            eye = getattr(n, "gn_eye", None)
+            if eye is not None and eye.get_active() != (k == node_id):
+                eye.set_active(k == node_id)
+        self._eyes_setting = False
+        out = self.nodes.get(G.OUTPUT)
+        if out is not None and getattr(out, "gn_badge", None) is not None:
+            out.gn_badge.set_text("NOT SHOWN" if node_id else "SHOWN")
+            context = out.gn_badge.get_style_context()
+            (context.add_class if node_id else context.remove_class)("gegl-nodes-off")
+        self.view.queue_draw()
+        self.say("")
+        if changed:
+            self.changed()
+
+    def _eye_toggled(self, node_id, button):
+        if self._eyes_setting:
+            return
+        self.view_node(node_id if button.get_active() else None)
+
+    def shown_graph(self):
+        """The graph that the layer shows: the graph, or while a node is
+        viewed, the graph with that node's result going to the output."""
+        graph = self.graph()
+        if self.viewing in graph["nodes"]:
+            graph["links"] = [link for link in graph["links"] if link["to"] != G.OUTPUT]
+            graph["links"].append({"from": self.viewing, "to": G.OUTPUT, "pad": "input"})
+        return graph
+
     # selection
 
     def select(self, ids, add=False, toggle=False):
@@ -674,6 +754,7 @@ class GraphEditor(Gtk.Box):
         self.view.queue_draw()
         n = len(self.selection)
         self.say("%d nodes selected" % n if n > 1 else "")
+        self._setups_menu()  # (Save Selection as Setup...)
 
     def box_select(self, x0, y0, x1, y1, add=False):
         """Selects the nodes the box (on the canvas, at the zoom) touches.
@@ -769,6 +850,13 @@ class GraphEditor(Gtk.Box):
             if w > 0 and h > 0:
                 cr.rectangle(x, y, w, h)
         cr.stroke()
+        viewed = self.nodes.get(self.viewing)
+        if viewed is not None:
+            a = viewed.get_allocation()
+            cr.set_line_width(3)
+            cr.set_source_rgb(*VIEWED)
+            cr.rectangle(a.x + r - 3, a.y + r - 3, a.width - 2 * r + 6, a.height - 2 * r + 6)
+            cr.stroke()
         if self._box:
             x0, y0, x1, y1, _ = self._box
             cr.rectangle(min(x0, x1) + 0.5, min(y0, y1) + 0.5, abs(x1 - x0), abs(y1 - y0))
@@ -788,6 +876,8 @@ class GraphEditor(Gtk.Box):
             if node is not None:
                 self._drop(node)
         self.selection -= set(gone)
+        if self.viewing in gone:
+            self.view_node(None)
         self.view.queue_draw()
         if gone:
             self.changed()
@@ -818,6 +908,7 @@ class GraphEditor(Gtk.Box):
             self.say("Not saved: %s" % e)
             return False
         self.say("Saved %d nodes as setup %s" % (len(ids), name.strip()))
+        self._setups_menu()
         return True
 
     def _scrolled(self, scroller, event):
@@ -855,19 +946,47 @@ class GraphEditor(Gtk.Box):
         at = ((around[0] - self.origin[0]) / self.zoom, (around[1] - self.origin[1]) / self.zoom)
         for node in self.nodes.values():
             self._world(node)
-        self.zoom = zoom
+        old, self.zoom = self.zoom, zoom
         _zoom_css(self, zoom)
         self._loading = True
         for node in self.nodes.values():
             node.set_socket_radius(SOCKET_RADIUS * zoom)
+            if getattr(node, "gn_grid", None) is not None:
+                node.gn_grid.set_column_spacing(round(6 * zoom))
             self._show_at(node)
+            # a size dragged with the node's corner zooms too
+            for prop in ("width", "height"):
+                size = node.get_property(prop)
+                if size > 0:
+                    self.view.child_set_property(node, prop, int(round(size * zoom / old)))
         self._loading = False
         self.zoom_label.set_label("%d%%" % round(zoom * 100))
+        # the new text and widget sizes come with the next style update,
+        # after this; GtkNodes does not lay its nodes out again for them by
+        # itself, and kept sizes from halfway (so nodes ran into each
+        # other): once more when the styles are in
+        GLib.timeout_add(60, self._relayout)
         self._fit_canvas(scroll=False)
         self.view.queue_resize()
         self.view.queue_draw()
         self._scroll_to(at[0] * zoom + self.origin[0] - on_screen[0],
                         at[1] * zoom + self.origin[1] - on_screen[1])
+
+    def _fit_later(self):
+        if not self._fit_pending:
+            self._fit_pending = GLib.idle_add(self._fit_now)
+
+    def _fit_now(self):
+        self._fit_pending = 0
+        self._fit_canvas()
+        return False
+
+    def _relayout(self):
+        for node in self.nodes.values():
+            node.queue_resize()
+        self.view.queue_resize()
+        self.view.queue_draw()
+        return False
 
     def zoom_to_fit(self):
         """The largest zoom that shows all the nodes, at most 100%."""
@@ -906,15 +1025,23 @@ class GraphEditor(Gtk.Box):
 
     def show_nodes(self):
         """Scrolls to the nodes: centred when they fit, else from their
-        top left."""
-        left, top, right, bottom = self._extent()
+        top left. (Worked out when it is done, after the next layout: the
+        canvas may move its origin before then.)"""
         h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
-        z, (ox, oy) = self.zoom, self.origin
-        pw, ph = h.get_page_size(), v.get_page_size()
-        w, hh = (right - left) * z, (bottom - top) * z
-        x = left * z + ox - (pw - w) / 2 if w < pw else left * z + ox - 20
-        y = top * z + oy - (ph - hh) / 2 if hh < ph else top * z + oy - 20
-        self._scroll_to(x, y)
+
+        def go():
+            left, top, right, bottom = self._extent()
+            z, (ox, oy) = self.zoom, self.origin
+            pw, ph = h.get_page_size(), v.get_page_size()
+            w, hh = (right - left) * z, (bottom - top) * z
+            x = left * z + ox - (pw - w) / 2 if w < pw else left * z + ox - 20
+            y = top * z + oy - (ph - hh) / 2 if hh < ph else top * z + oy - 20
+            for adj, value, size in ((h, x, self.view.get_size_request()[0]),
+                                     (v, y, self.view.get_size_request()[1])):
+                adj.set_upper(max(adj.get_upper(), size))
+                adj.set_value(value)
+            return False
+        GLib.idle_add(go, priority=GLib.PRIORITY_DEFAULT_IDLE + 10)
 
     def _fit_canvas(self, scroll=True):
         """Makes the canvas reach past the nodes on every side: at least a
@@ -1047,12 +1174,11 @@ class GraphEditor(Gtk.Box):
 
     # saved setups
 
-    def _setups_opening(self, button):
-        if button.get_active():
-            button.set_popup(self._setups_menu())
-
     def _setups_menu(self):
-        menu = _menu_widget()
+        """Fills the Setups menu again, and gives it."""
+        menu = self.setups_popup
+        for item in menu.get_children():
+            menu.remove(item)
         save = Gtk.MenuItem(label="Save Setup...")
         save.connect("activate", lambda i: self._ask_save())
         menu.append(save)
@@ -1100,6 +1226,7 @@ class GraphEditor(Gtk.Box):
             self.say("Not saved: %s" % e)
             return False
         self.say("Saved as setup %s" % name.strip())
+        self._setups_menu()
         return True
 
     def _read(self, name):
@@ -1136,6 +1263,7 @@ class GraphEditor(Gtk.Box):
         except (G.GraphError, OSError) as e:
             self.say("Not renamed: %s" % e)
             return False
+        self._setups_menu()
         return True
 
     def delete_setup(self, name):
@@ -1145,6 +1273,7 @@ class GraphEditor(Gtk.Box):
             self.say("Not deleted: %s" % e)
             return False
         self.say("Setup %s deleted" % name)
+        self._setups_menu()
         return True
 
     def _open_folder(self):
@@ -1246,6 +1375,12 @@ class GraphEditor(Gtk.Box):
         return False
 
     def say(self, text):
+        """Shows text in the status line; with no text, what is shown on
+        the layer when that is a node's image."""
+        if not text and self.viewing in self.nodes:
+            node = self.nodes[self.viewing]
+            text = ("The layer shows the image after %s (its eye, or Ctrl+Shift+click, "
+                    "shows the output again)" % node.gn_title)
         self.status.set_text(text)
 
     def changed(self):
@@ -1258,6 +1393,11 @@ class GraphEditor(Gtk.Box):
         if self.zoom != 1.0:
             node.set_socket_radius(SOCKET_RADIUS * self.zoom)
         self.view.add(node)
+        # no size of its own: GtkNodes keeps every node at least 100 x 100
+        # (or at the size dragged with its corner), which does not zoom,
+        # so small nodes ran into each other at 50%; 0 is "its contents"
+        self.view.child_set_property(node, "width", 0)
+        self.view.child_set_property(node, "height", 0)
         # the links follow a node that moves or changes size; GTK would
         # otherwise redraw only the node's own area, and leave parts of
         # the old links on the canvas
@@ -1309,6 +1449,7 @@ class GraphEditor(Gtk.Box):
             self._connect(link["from"], link["to"], link["pad"])
         self.selection &= set(self.nodes)
         self._loading = False
+        self.view_node(self.viewing if self.viewing in self.nodes else None)
         self._fit_canvas()
 
     def _connect(self, src, dst, pad):
@@ -1453,4 +1594,6 @@ class GraphEditor(Gtk.Box):
             self._drop(node)
             del self.nodes[node_id]
             self.selection.discard(node_id)
+            if node_id == self.viewing:
+                self.view_node(None)
             self.changed()
