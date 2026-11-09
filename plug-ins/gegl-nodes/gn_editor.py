@@ -25,6 +25,25 @@ IMAGE_KEY = 1  # all sockets carry images: any output fits any input
 COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6cc06c"}
 
 
+# GIMP's theme gives every vertical box a background (".vertical" in
+# themes/Default/common.css). A GtkNodes node is a vertical box, and that
+# background, painted after GtkNodes draws the node's frame, hid parts of
+# the frame (and left parts of it behind when a node moved).
+_CSS = b".gegl-nodes-node { background-color: transparent; background-image: none; }"
+_css_screens = set()
+
+
+def _style(widget):
+    screen = widget.get_screen()
+    if screen not in _css_screens:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(_CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        _css_screens.add(screen)
+    widget.get_style_context().add_class("gegl-nodes-node")
+
+
 def _rgba(spec):
     c = Gdk.RGBA()
     c.parse(spec)
@@ -60,6 +79,7 @@ class _Node(GtkNodes.Node):
         self.gn_sinks = {}
         self.gn_source = None
         self.set_label(label)
+        _style(self)
         for signal in ("node-socket-connect", "node-socket-disconnect"):
             self.connect(signal, lambda *a: editor.changed())
 
@@ -192,39 +212,205 @@ class GraphEditor(Gtk.Box):
         self.nodes = {}
 
         bar = Gtk.Box(spacing=6, margin=4)
-        self.search = Gtk.SearchEntry(placeholder_text="Add a node: type a filter name",
+        self.search = Gtk.SearchEntry(placeholder_text="Search filters to add",
                                       width_chars=36)
-        store = Gtk.ListStore(str, str)
-        for info in sorted(gn_ops.catalog().values(), key=lambda i: i.title.lower()):
-            store.append(["%s  (%s)" % (info.title, info.name), info.name])
-        completion = Gtk.EntryCompletion(model=store, text_column=0, minimum_key_length=1,
-                                         popup_set_width=False)
-        completion.set_match_func(self._match, None)
-        completion.connect("match-selected", self._picked)
-        self.search.set_completion(completion)
+        # the matches, in a popover under the field (GtkEntryCompletion's
+        # list came out empty or a few pixels wide under GIMP's theme)
+        self._ops = sorted(gn_ops.catalog().values(), key=lambda i: i.title.lower())
+        self.matches = Gtk.ListBox(activate_on_single_click=True)
+        self.matches.connect("row-activated", lambda box, row: self._take(row))
+        scrolled = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      propagate_natural_height=True, max_content_height=360,
+                                      min_content_width=380)
+        scrolled.add(self.matches)
+        self.found = Gtk.Popover(relative_to=self.search, modal=False,
+                                 position=Gtk.PositionType.BOTTOM)
+        self.found.add(scrolled)
+        scrolled.show_all()
+        self.search.connect("search-changed", self._find)
+        self.search.connect("activate", lambda e: self._take(
+            self.matches.get_selected_row() or self.matches.get_row_at_index(0)))
+        self.search.connect("key-press-event", self._search_key)
+        self.search.connect("stop-search", lambda e: self._end_search())
+        add = Gtk.MenuButton(label="Add", tooltip_text="Add a node (Shift+A, or right-click "
+                             "on the canvas)")
+        self._add_at = None
+        add.set_popup(self._menu())
+        bar.pack_start(add, False, False, 0)
         bar.pack_start(self.search, False, False, 0)
         self.status = Gtk.Label(xalign=0.0, ellipsize=3)
         bar.pack_start(self.status, True, True, 0)
+        self.pack_start(self._menubar(), False, False, 0)
         self.pack_start(bar, False, False, 0)
 
         self.view = GtkNodes.NodeView()
         self.view.connect("node-drag-end", lambda *a: self.emit("moved"))
+        self.view.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.view.connect("button-press-event", self._pressed)
+        self.connect("hierarchy-changed", self._toplevel)
         scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         scroller.add(self.view)
         self.pack_start(scroller, True, True, 0)
         self.load(graph or G.new_graph())
 
-    @staticmethod
-    def _match(completion, key, it, data):
-        text = completion.get_model()[it][0].lower()
-        return all(word in text for word in key.lower().split())
+    def _find(self, entry):
+        for row in self.matches.get_children():
+            row.destroy()
+        words = entry.get_text().lower().split()
+        if not words:
+            self.found.popdown()
+            return
+        for info in self._ops:
+            text = "%s %s %s" % (info.title, info.name, " ".join(info.categories))
+            if all(word in text.lower() for word in words):
+                label = Gtk.Label(xalign=0.0, margin=4)
+                label.set_markup("%s  <small>%s</small>" % (
+                    GLib.markup_escape_text(info.title), GLib.markup_escape_text(info.name)))
+                label.set_tooltip_text(info.description)
+                row = Gtk.ListBoxRow()
+                row.add(label)
+                row.gn_op = info.name
+                self.matches.add(row)
+        rows = self.matches.get_children()
+        if rows:
+            self.matches.select_row(rows[0])
+            self.matches.show_all()
+            self.found.popup()
+        else:
+            self.found.popdown()
+        self.say("" if rows else "No filter matches: %s" % entry.get_text())
 
-    def _picked(self, completion, model, it):
-        name = model[it][1]
-        GLib.idle_add(lambda: self.search.set_text("") or False)
-        x = 40 + 30 * (len(self.nodes) % 8)
-        self.add_op(name, 240 + x, 20 + x)
+    def _search_key(self, entry, event):
+        rows = self.matches.get_children()
+        if event.keyval not in (Gdk.KEY_Down, Gdk.KEY_Up) or not rows:
+            return False
+        row = self.matches.get_selected_row()
+        i = row.get_index() if row else -1
+        i = min(i + 1, len(rows) - 1) if event.keyval == Gdk.KEY_Down else max(i - 1, 0)
+        self.matches.select_row(rows[i])
+        rows[i].grab_focus()
+        entry.grab_focus_without_selecting()
         return True
+
+    def _take(self, row):
+        if row is None:
+            return
+        self._end_search()
+        self._add_picked(row.gn_op)
+
+    def _end_search(self):
+        self.found.popdown()
+        GLib.idle_add(lambda: self.search.set_text("") or False)
+
+    def _add_picked(self, name):
+        if self._add_at is not None:
+            x, y = self._add_at
+            self._add_at = None
+        else:
+            step = 40 + 30 * (len(self.nodes) % 8)
+            x, y = 240 + step, 20 + step
+        self.add_op(name, x, y)
+
+    @staticmethod
+    def groups():
+        """The operations offered, by their first category."""
+        groups = {}
+        for info in gn_ops.catalog().values():
+            category = next((c for c in info.categories if c), "other").lower()
+            groups.setdefault(category, []).append(info)
+        return {c: sorted(ops, key=lambda i: i.title.lower()) for c, ops in sorted(groups.items())}
+
+    def _ops_menu(self, ops):
+        sub = Gtk.Menu()
+        for info in ops:
+            op = Gtk.MenuItem(label=info.title)
+            op.set_tooltip_text("%s\n%s" % (info.name, info.description))
+            op.connect("activate", lambda w, name=info.name: self._add_picked(name))
+            sub.append(op)
+        return sub
+
+    def _menu(self):
+        """All operations offered, by category, as in Blender's Add menu."""
+        menu = Gtk.Menu()
+        for category, ops in self.groups().items():
+            item = Gtk.MenuItem(label=category.replace("-", " ").capitalize())
+            item.set_submenu(self._ops_menu(ops))
+            menu.append(item)
+        menu.connect("deactivate", lambda m: GLib.idle_add(self._forget_place))
+        menu.show_all()
+        self._popup = menu
+        return menu
+
+    def _menubar(self):
+        """The same, as a row of menus across the top; it scrolls sideways
+        when the window is narrower than the row."""
+        self.menubar = Gtk.MenuBar()
+        for category, ops in self.groups().items():
+            item = Gtk.MenuItem(label=category.replace("-", " ").capitalize())
+            item.set_submenu(self._ops_menu(ops))
+            self.menubar.append(item)
+        row = Gtk.ScrolledWindow(vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                 hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                 propagate_natural_height=True)
+        row.add(self.menubar)
+        return row
+
+    def _forget_place(self):
+        # after an item's "activate", which comes after "deactivate"
+        self._add_at = None
+        return False
+
+    def _pointer(self):
+        window = self.view.get_window()
+        seat = window.get_display().get_default_seat()
+        _, x, y, _ = window.get_device_position(seat.get_pointer())
+        a = self.view.get_allocation()
+        return x - a.x, y - a.y
+
+    def _on_node(self, x, y):
+        for node in self.nodes.values():
+            nx = self.view.child_get_property(node, "x")
+            ny = self.view.child_get_property(node, "y")
+            if nx <= x < nx + node.get_allocated_width() and \
+               ny <= y < ny + node.get_allocated_height():
+                return True
+        return False
+
+    def popup_add(self, event=None):
+        """The Add menu at the pointer; the node goes where the pointer is."""
+        x, y = self._pointer()
+        self._add_at = (max(0, x - 20), max(0, y - 10))
+        self._popup.popup_at_pointer(event)
+
+    def _pressed(self, view, event):
+        x, y = self._pointer()
+        if self._on_node(x, y):
+            return False
+        # a click on the canvas takes the keys from the search field (for
+        # Shift+A), as in Blender
+        top = self.get_toplevel()
+        if isinstance(top, Gtk.Window):
+            top.set_focus(None)
+        if event.button != Gdk.BUTTON_SECONDARY:
+            return False
+        self.popup_add(event)
+        return True
+
+    def _toplevel(self, widget, previous):
+        # Shift+A anywhere in the window, also with nothing focused
+        top = self.get_toplevel()
+        if isinstance(top, Gtk.Window) and not getattr(top, "gn_keys", False):
+            top.connect("key-press-event", self._key)
+            top.gn_keys = True
+
+    def _key(self, widget, event):
+        if isinstance(self.get_toplevel().get_focus(), Gtk.Editable):
+            return False
+        if event.keyval == Gdk.KEY_A or (event.keyval == Gdk.KEY_a and
+                                         event.state & Gdk.ModifierType.SHIFT_MASK):
+            self.popup_add(event)
+            return True
+        return False
 
     def say(self, text):
         self.status.set_text(text)

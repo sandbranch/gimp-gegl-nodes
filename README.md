@@ -12,6 +12,12 @@ after saving and opening the XCF.
 *Filters > Generic > Node Editor...* The editor opens as its own window
 (see "Docked like Blender" below).
 
+To add a node: pick a filter from the row of menus along the top (one
+menu per GEGL category), click **Add**, press **Shift+A** or right-click
+on the canvas (the node goes where you clicked), or type in the search
+field and press Enter. Link nodes by dragging from a green Output dot to
+an Input dot; the Output node's input is what the layer shows.
+
 ## What is in here
 
 - **`operations/node-graph.c`**: the GEGL operation `nodes:graph`
@@ -59,7 +65,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-80 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+86 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and
@@ -80,6 +86,14 @@ for upstream:
 - `fix/child-y`: a node's `y` place was set from, and read back as, its
   `x`, so nodes ended up on the diagonal (also in
   `gtk_nodes_node_view_save` and `load`).
+
+## GIMP's theme
+
+GIMP's theme gives every vertical box a background (`.vertical` in
+`themes/Default/common.css`). A GtkNodes node is a vertical box, so that
+background was painted over parts of the node's frame, and left bits of
+frames behind when a node moved. The editor makes its nodes' background
+transparent.
 
 ## Docked like Blender
 

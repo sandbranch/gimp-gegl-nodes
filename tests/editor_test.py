@@ -23,6 +23,7 @@ Gegl.init(None)
 
 import gn_editor  # noqa: E402
 import gn_graph as G  # noqa: E402
+import gn_ops  # noqa: E402
 
 failures = 0
 
@@ -106,6 +107,33 @@ check("load keeps the places", all(
     (again["nodes"][k]["x"], again["nodes"][k]["y"]) == (v["x"], v["y"])
     for k, v in G.from_json(saved)["nodes"].items()))
 check("load keeps the values shown", editor.nodes[blur].gn_widgets["std-dev-x"].get_value() == 4.5)
+
+# adding nodes: the search field, the menu row, the Add menu
+before = set(editor.nodes)
+editor.search.set_text("gaussian blur")
+editor._find(editor.search)
+pump()
+rows = editor.matches.get_children()
+check("the search lists the matches", [r.gn_op for r in rows] == ["gegl:gaussian-blur"],
+      [r.gn_op for r in rows])
+editor.search.emit("activate")
+pump()
+added = set(editor.nodes) - before
+check("Enter in the search adds the node",
+      [getattr(editor.nodes[k], "gn_op", None) for k in added] == ["gegl:gaussian-blur"])
+offered = sorted(i.name for ops in editor.groups().values() for i in ops)
+check("the menu row has every offered filter once",
+      offered == sorted(gn_ops.catalog()) and
+      len(editor.menubar.get_children()) == len(editor.groups()))
+check("the Add menu has the same categories", [i.get_label() for i in editor._popup.get_children()]
+      == [i.get_label() for i in editor.menubar.get_children()])
+before = set(editor.nodes)
+first = editor.menubar.get_children()[0].get_submenu().get_children()[0]
+first.activate()
+pump()
+check("a filter picked in the menu row is added", len(set(editor.nodes) - before) == 1)
+check("nodes are styled out of the theme's box background",
+      all(n.get_style_context().has_class("gegl-nodes-node") for n in editor.nodes.values()))
 
 shot = os.environ.get("GN_SHOT")
 if shot:

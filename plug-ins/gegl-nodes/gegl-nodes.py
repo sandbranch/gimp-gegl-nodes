@@ -101,6 +101,8 @@ class Session:
         self.window.add(self.editor)
         self.window.connect("delete-event", self.close)
         self.window.show_all()
+        # nothing focused, so the search field shows its hint
+        self.window.set_focus(None)
         GimpUi.window_set_transient(self.window)
 
     def later(self):
