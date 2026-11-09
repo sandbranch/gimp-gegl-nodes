@@ -233,6 +233,17 @@ check("canvas: the graph keeps where it is", editor.graph()["nodes"][far]["x"] =
 w1, h1 = editor.view.get_size_request()
 check("canvas: grew to hold it", w1 > w0 and h1 > h0, ((w0, h0), (w1, h1)))
 
+# resizing the window moves nothing on the canvas (it once moved all
+# the nodes and the view, a frame apart, which flashed)
+spots = lambda: (list(editor.origin), {k: (editor.view.child_get_property(n, "x"),  # noqa: E731
+                                          editor.view.child_get_property(n, "y"))
+                                      for k, n in editor.nodes.items()})
+was = spots()
+for size in ((1000, 450), (1300, 600), (1200, 500)):
+    win.resize(*size)
+    pump()
+check("canvas: resizing the window moves no node", spots() == was, (was, spots()))
+
 # selecting nodes
 editor.load(G.new_graph())
 pump()

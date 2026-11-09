@@ -114,6 +114,20 @@ for port in range(8087, 8180):
       timeout 300 python3 "$here/editor_test.py" >"$out/editor.log" 2>&1
     kill "$bw" 2>/dev/null
     report "$out/editor.log" editor
+
+    # dragging nodes with real pointer events (XTest), on Xvfb
+    if command -v Xvfb >/dev/null; then
+        Xvfb :97 -screen 0 1200x700x24 >/dev/null 2>&1 &
+        xvfb=$!
+        sleep 1
+        DISPLAY=:97 GDK_BACKEND=x11 GEGL_PATH=$gegl_path \
+          GI_TYPELIB_PATH="$gtknodes/lib/girepository-1.0" LD_LIBRARY_PATH="$gtknodes/lib" \
+          timeout 120 python3 "$here/drag/drag_test.py" >"$out/drag.log" 2>&1
+        kill "$xvfb" 2>/dev/null
+        report "$out/drag.log" drag
+    else
+        echo "SKIP drag: no Xvfb"
+    fi
     if grep -q "invalid (NULL) class pointer" "$out/editor.log"; then
         echo "FAIL editor: GtkNodes signals into freed nodes (GtkNodes without fix/socket-handlers?)"
         status=1

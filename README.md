@@ -103,9 +103,10 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-165 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+174 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
-accepted by it), the editor widget on a Broadway display, headless GIMP
+accepted by it), the editor widget on a Broadway display, nodes dragged with real
+pointer events (XTest on Xvfb), headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and
 opened again), and the editor in a real GIMP on Broadway, driven through
 the editor's own calls, with the layer checked pixel by pixel against
@@ -141,6 +142,17 @@ for upstream:
   icon, no button), but its introspection data refused `None`. Without
   it, the Layer and Output nodes keep a delete button that does
   nothing.
+- `fix/drag-root-coords`: a dragged node was moved by the pointer's
+  offset within its own window, which moves only at the next layout, so
+  until then each motion event added the whole offset again and the node
+  ran away from the pointer (a 90 px drag moved it 522 px on a large
+  canvas). It now goes to its place at the start of the drag plus how
+  far the pointer has moved on the screen.
+
+GtkNodes' child properties `x` and `y` are not a plain read either: they
+copy the node's own `x` and `y` into GtkNodes' place for it, and read
+halfway through a move (between setting `x` and `y`) they undid the
+move's `y`. The editor reads the node's own properties instead.
 
 ## GIMP's theme
 

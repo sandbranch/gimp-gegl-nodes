@@ -588,8 +588,8 @@ class GraphEditor(Gtk.Box):
     def _node_at(self, x, y):
         """The id of the node at x, y on the canvas, or None."""
         for node_id, node in self.nodes.items():
-            nx = self.view.child_get_property(node, "x")
-            ny = self.view.child_get_property(node, "y")
+            nx = self._pos(node)[0]
+            ny = self._pos(node)[1]
             if nx <= x < nx + node.get_allocated_width() and \
                ny <= y < ny + node.get_allocated_height():
                 return node_id
@@ -682,51 +682,38 @@ class GraphEditor(Gtk.Box):
         top, bottom = sorted((y0, y1))
         hit = []
         for node_id, node in self.nodes.items():
-            nx = self.view.child_get_property(node, "x")
-            ny = self.view.child_get_property(node, "y")
+            nx = self._pos(node)[0]
+            ny = self._pos(node)[1]
             w, h = self._size(node)
             if nx < right and left < nx + w and ny < bottom and top < ny + h:
                 hit.append(node_id)
         self.select(hit, add=add)
 
     def _drag_begin(self, view, node):
-        self._drag = (node.gn_id, {k: (self.view.child_get_property(n, "x"),
-                                       self.view.child_get_property(n, "y"))
+        self._drag = (node.gn_id, {k: (self._pos(n)[0],
+                                       self._pos(n)[1])
                                    for k, n in self.nodes.items()})
 
     def _dragged(self, node, pspec):
         """While a selected node is dragged, the others selected move with
-        it (GtkNodes moves only the one dragged)."""
+        it (GtkNodes moves only the one dragged). Called when its y is set:
+        GtkNodes sets x, then y, at each move."""
         if self._moving or not self._drag or node.gn_id != self._drag[0]:
             return
+        x, y = self._pos(node)
         # near the right or bottom end of the canvas: it grows (GtkNodes
         # keeps a node inside the canvas); the left and top grow when the
         # drag ends
         w, h = self.view.get_size_request()
-        x = self.view.child_get_property(node, "x") + node.get_allocated_width()
-        y = self.view.child_get_property(node, "y") + node.get_allocated_height()
-        if x > w - 40 or y > h - 40:
-            self.view.set_size_request(max(w, x + 400), max(h, y + 400))
-        if self.snap:
-            x, y = self.view.child_get_property(node, "x"), self.view.child_get_property(node, "y")
-            z, (ox, oy) = self.zoom, self.origin
-            wx, wy = self.snapped((x - ox) / z), self.snapped((y - oy) / z)
-            sx, sy = int(round(wx * z)) + ox, int(round(wy * z)) + oy
-            # (the place in the graph kept exactly: from the canvas at
-            # other zooms than 1 it would come back rounded)
-            node.gn_pos = [float(wx), float(wy)]
-            if (sx, sy) != (x, y):
-                # (GtkNodes places the node from the pointer at each move,
-                # not from where it is, so this does not add up)
-                self._moving = True
-                self.view.child_set_property(node, "x", sx)
-                self.view.child_set_property(node, "y", sy)
-                self._moving = False
-        if node.gn_id not in self.selection:
-            return
+        right, bottom = x + node.get_allocated_width(), y + node.get_allocated_height()
+        if right > w - 40 or bottom > h - 40:
+            self.view.set_size_request(max(w, right + 400), max(h, bottom + 400))
+        if node.gn_id in self.selection:
+            self._move_others(node, x, y)
+
+    def _move_others(self, node, x, y):
         start = self._drag[1]
-        dx = self.view.child_get_property(node, "x") - start[node.gn_id][0]
-        dy = self.view.child_get_property(node, "y") - start[node.gn_id][1]
+        dx, dy = x - start[node.gn_id][0], y - start[node.gn_id][1]
         self._moving = True
         for k in self.selection:
             if k != node.gn_id and k in self.nodes and k in start:
@@ -736,9 +723,34 @@ class GraphEditor(Gtk.Box):
         self._moving = False
 
     def _drag_end(self, view, node):
+        # snapped when the drag ends: GtkNodes moves a node by the pointer's
+        # offset from where its window was drawn last, so a node snapped
+        # during the drag drifted further at each move
+        if self.snap and self._drag and node.gn_id == self._drag[0]:
+            x, y = self._pos(node)
+            z, (ox, oy) = self.zoom, self.origin
+            wx, wy = self.snapped((x - ox) / z), self.snapped((y - oy) / z)
+            sx, sy = int(round(wx * z)) + ox, int(round(wy * z)) + oy
+            self._moving = True
+            self.view.child_set_property(node, "x", sx)
+            self.view.child_set_property(node, "y", sy)
+            self._moving = False
+            # (kept exactly: read back from the canvas at other zooms than
+            # 1 it would come back rounded)
+            node.gn_pos = [float(wx), float(wy)]
+            if node.gn_id in self.selection:
+                self._move_others(node, sx, sy)
         self._drag = None
         self._fit_canvas()
         self.emit("moved")
+
+    def _pos(self, node):
+        """Where the node is on the canvas: its own x and y, which GtkNodes
+        sets whenever it moves the node. (GtkNodes' child properties x and
+        y are not a plain read: they copy the node's x and y back into
+        GtkNodes' place for the node, and read halfway through a move,
+        between x and y, that undid the move's y.)"""
+        return node.get_property("x"), node.get_property("y")
 
     def _draw_selection(self, view, cr):
         """The outlines of the selected nodes and the box being drawn, over
@@ -751,9 +763,9 @@ class GraphEditor(Gtk.Box):
             node = self.nodes.get(k)
             if node is None:
                 continue
-            x = self.view.child_get_property(node, "x") + r - 1
-            y = self.view.child_get_property(node, "y") + r - 1
-            w, h = node.get_allocated_width() - 2 * r + 2, node.get_allocated_height() - 2 * r + 2
+            a = node.get_allocation()  # (as for the fills)
+            x, y = a.x + r - 1, a.y + r - 1
+            w, h = a.width - 2 * r + 2, a.height - 2 * r + 2
             if w > 0 and h > 0:
                 cr.rectangle(x, y, w, h)
         cr.stroke()
@@ -905,16 +917,22 @@ class GraphEditor(Gtk.Box):
         self._scroll_to(x, y)
 
     def _fit_canvas(self, scroll=True):
-        """Makes the canvas reach a window's size past the nodes on every
-        side. When it grows on the left or at the top, the nodes and the
-        view move with it, so nothing moves on screen."""
+        """Makes the canvas reach about a window's size past the nodes on
+        every side. The room on the left and at the top is changed only
+        when it is less than half a window or more than three (so that
+        resizing the window moves nothing); then the nodes and the view
+        move with it, so nothing moves on screen."""
         h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
         pw, ph = max(h.get_page_size(), 300), max(v.get_page_size(), 200)
         left, top, right, bottom = self._extent()
         z = self.zoom
-        ox, oy = int(pw - left * z), int(ph - top * z)
+        ox, oy = self.origin
+        if not pw / 2 <= ox + left * z <= 3 * pw:
+            ox = int(pw - left * z)
+        if not ph / 2 <= oy + top * z <= 3 * ph:
+            oy = int(ph - top * z)
         dx, dy = ox - self.origin[0], oy - self.origin[1]
-        width, height = int((right - left) * z + 2 * pw), int((bottom - top) * z + 2 * ph)
+        width, height = int(ox + right * z + pw), int(oy + bottom * z + ph)
         if (dx, dy) != (0, 0):
             for node in self.nodes.values():
                 self._world(node)
@@ -952,8 +970,8 @@ class GraphEditor(Gtk.Box):
     def _world(self, node):
         """Where the node is in the graph (at zoom 1): kept, unless it was
         dragged since."""
-        x = self.view.child_get_property(node, "x")
-        y = self.view.child_get_property(node, "y")
+        x = self._pos(node)[0]
+        y = self._pos(node)[1]
         sx, sy = self._shown(node)
         if x != sx:
             node.gn_pos[0] = (x - self.origin[0]) / self.zoom
@@ -1001,9 +1019,11 @@ class GraphEditor(Gtk.Box):
         r = SOCKET_RADIUS * self.zoom
         corner = 4
         for node in self.nodes.values():
-            x = self.view.child_get_property(node, "x") + r
-            y = self.view.child_get_property(node, "y") + r
-            w, h = node.get_allocated_width() - 2 * r, node.get_allocated_height() - 2 * r
+            # (where GTK has the node now, which is where it is drawn; its
+            # x and y may be newer until the next layout)
+            a = node.get_allocation()
+            x, y = a.x + r, a.y + r
+            w, h = a.width - 2 * r, a.height - 2 * r
             if w <= 0 or h <= 0:
                 continue
             cr.new_sub_path()
@@ -1233,7 +1253,6 @@ class GraphEditor(Gtk.Box):
         # otherwise redraw only the node's own area, and leave parts of
         # the old links on the canvas
         node.connect("size-allocate", lambda *a: self.view.queue_draw())
-        node.connect("notify::x", self._dragged)
         node.connect("notify::y", self._dragged)
         self._show_at(node)
         node.show_all()
@@ -1342,7 +1361,7 @@ class GraphEditor(Gtk.Box):
         if G.OUTPUT in column:
             column[G.OUTPUT] = max(last, column[G.OUTPUT])
         columns = {}
-        for k in sorted(keys, key=lambda k: self.view.child_get_property(self.nodes[k], "y")):
+        for k in sorted(keys, key=lambda k: self._pos(self.nodes[k])[1]):
             columns.setdefault(column[k], []).append(k)
 
         size = {k: self._size(self.nodes[k]) for k in keys}
@@ -1354,8 +1373,8 @@ class GraphEditor(Gtk.Box):
             left = self.origin[0] + self.LEFT * self.zoom
             top = self.origin[1] + self.TOP * self.zoom
         else:
-            left = min(self.view.child_get_property(self.nodes[k], "x") for k in keys)
-            top = min(self.view.child_get_property(self.nodes[k], "y") for k in keys)
+            left = min(self._pos(self.nodes[k])[0] for k in keys)
+            top = min(self._pos(self.nodes[k])[1] for k in keys)
         x = left
         for c in sorted(columns):
             keys = columns[c]
@@ -1394,8 +1413,8 @@ class GraphEditor(Gtk.Box):
         self.view.queue_draw()
         self.emit("moved")
         # (where they are on the canvas now, which may have grown)
-        return {k: (self.view.child_get_property(self.nodes[k], "x"),
-                    self.view.child_get_property(self.nodes[k], "y")) for k in place}
+        return {k: (self._pos(self.nodes[k])[0],
+                    self._pos(self.nodes[k])[1]) for k in place}
 
     # what a user does, also for the tests
 
