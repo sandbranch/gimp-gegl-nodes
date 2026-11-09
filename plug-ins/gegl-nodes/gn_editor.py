@@ -25,6 +25,8 @@ import gn_preview  # noqa: E402
 
 IMAGE_KEY = 1  # all sockets carry images: any output fits any input
 # zoom levels; 1 is the theme's own size
+UNDO_STEPS = 50  # how many steps back
+UNDO_GROUP_MS = 400  # changes closer together than this are one step
 ZOOMS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3, 1.5)
 GRID = 20  # the canvas grid at zoom 1, a stronger line every fifth
 SOCKET_RADIUS = 8.0  # GtkNodes' own
@@ -468,6 +470,19 @@ class GraphEditor(Gtk.Box):
         self.status = Gtk.Label(xalign=0.0, ellipsize=3)
         bar.pack_start(self.status, True, True, 0)
         bar.pack_end(zoom_box, False, False, 0)
+        undo_box = Gtk.Box()
+        undo_box.get_style_context().add_class("linked")
+        self.undo_button = _icon_button(Gtk.Button, None, "edit-undo", "Undo (Ctrl+Z)")
+        self.redo_button = _icon_button(Gtk.Button, None, "edit-redo",
+                                        "Redo (Ctrl+Shift+Z, Ctrl+Y)")
+        for button, text, act in ((self.undo_button, "Undo", self.undo),
+                                  (self.redo_button, "Redo", self.redo)):
+            if not button.get_child().get_children():
+                button.get_child().add(Gtk.Label(label=text))
+            button.connect("clicked", lambda b, act=act: act())
+            button.set_sensitive(False)
+            undo_box.pack_start(button, False, False, 0)
+        bar.pack_end(undo_box, False, False, 0)
         top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         top.get_style_context().add_class("gegl-nodes-top")
         top.pack_start(self._menubar(), False, False, 0)
@@ -516,6 +531,13 @@ class GraphEditor(Gtk.Box):
         _zoom_css(self, self.zoom)
         self.load(graph or G.new_graph())
         self._setups_menu()
+        # undo: the graph as it was before each step, as JSON
+        self._past = []
+        self._future = []
+        self._state = G.to_json(self.graph())
+        self._record_pending = 0
+        self.connect("changed", lambda e: self._record_later())
+        self.connect("moved", lambda e: self._record_later())
 
     def _find(self, entry):
         for row in self.matches.get_children():
@@ -736,6 +758,71 @@ class GraphEditor(Gtk.Box):
             self.view.queue_draw()
             return True
         return False
+
+    # undo and redo: the whole graph as it was, step by step
+
+    def _record_later(self):
+        if self._record_pending:
+            GLib.source_remove(self._record_pending)
+        self._record_pending = GLib.timeout_add(UNDO_GROUP_MS, self._record)
+
+    def _record(self):
+        """Makes what changed since the last step one step."""
+        if self._record_pending:
+            GLib.source_remove(self._record_pending)
+        self._record_pending = 0
+        now = G.to_json(self.graph())
+        if now != self._state:
+            self._past.append(self._state)
+            del self._past[:-UNDO_STEPS]
+            self._future = []
+            self._state = now
+        self._undo_buttons()
+        return False
+
+    def _undo_buttons(self):
+        self.undo_button.set_sensitive(bool(self._past))
+        self.redo_button.set_sensitive(bool(self._future))
+
+    def _go_to(self, state):
+        self._state = state
+        self.load(G.from_json(state))
+        self._undo_buttons()
+        # (the layer follows; the step is not recorded again, as the graph
+        # is the state now)
+        self.changed()
+
+    def undo(self):
+        self._record()
+        if not self._past:
+            self.say("Nothing to undo")
+            return False
+        self._future.append(self._state)
+        self._go_to(self._past.pop())
+        self.say("Undone")
+        return True
+
+    def redo(self):
+        self._record()
+        if not self._future:
+            self.say("Nothing to redo")
+            return False
+        self._past.append(self._state)
+        self._go_to(self._future.pop())
+        self.say("Redone")
+        return True
+
+    def clear_all(self):
+        """Back to the start: only the layer and the output, linked, where
+        they are. (Ctrl+Z brings the graph back.)"""
+        graph = self.graph()
+        new = G.new_graph()
+        for k in (G.LAYER, G.OUTPUT):
+            new["nodes"][k].update(x=graph["nodes"][k]["x"], y=graph["nodes"][k]["y"])
+        self.selection = set()
+        self.load(new)
+        self.changed()
+        self.say("Cleared (Ctrl+Z brings it back)")
 
     # previews: the image at a node, in a small window
 
@@ -1209,6 +1296,12 @@ class GraphEditor(Gtk.Box):
         menu = self.setups_popup
         for item in menu.get_children():
             menu.remove(item)
+        clear = Gtk.MenuItem(label="Clear All")
+        clear.set_tooltip_text("Only the layer and the output again (Ctrl+Z brings the "
+                               "graph back)")
+        clear.connect("activate", lambda i: self.clear_all())
+        menu.append(clear)
+        menu.append(Gtk.SeparatorMenuItem())
         save = Gtk.MenuItem(label="Save Setup...")
         save.connect("activate", lambda i: self._ask_save())
         menu.append(save)
@@ -1380,6 +1473,16 @@ class GraphEditor(Gtk.Box):
             if event.keyval in (Gdk.KEY_0, Gdk.KEY_KP_0):
                 self.set_zoom(1.0)
                 return True
+            # (also from a node's field: GTK 3's fields have no undo of
+            # their own, and a value typed there is a step here)
+            shift = event.state & Gdk.ModifierType.SHIFT_MASK
+            if event.keyval in (Gdk.KEY_z, Gdk.KEY_Z) and not shift:
+                self.undo()
+                return True
+            if (event.keyval in (Gdk.KEY_z, Gdk.KEY_Z) and shift) or \
+                    event.keyval in (Gdk.KEY_y, Gdk.KEY_Y):
+                self.redo()
+                return True
         focus = self.get_toplevel().get_focus()
         if isinstance(focus, Gtk.Editable) or (
                 focus is not None and focus.get_ancestor(GtkNodes.Node) is not None):
@@ -1502,6 +1605,9 @@ class GraphEditor(Gtk.Box):
                 source = socket.get_input()
                 if source is not None and getattr(source, "gn_node", None) in self.nodes:
                     graph["links"].append({"from": source.gn_node, "to": node_id, "pad": pad})
+        # in one order, so that the same graph is the same JSON (for undo:
+        # the nodes' order changes when a graph is shown again)
+        graph["links"].sort(key=lambda link: (link["to"], link["pad"], link["from"]))
         return graph
 
     # automatic layout

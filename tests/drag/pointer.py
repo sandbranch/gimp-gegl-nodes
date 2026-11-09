@@ -1,6 +1,6 @@
 # Real pointer events on an X display (XTest), from a process of its own:
 #   python3 pointer.py move X Y | press | release | drag X0 Y0 X1 Y1 STEPS
-#                      | click X Y | dclick X Y | keys KEYSYM...  (e.g. keys 3 period 5 Return)
+#                      | click X Y | dclick X Y | keys KEYSYM... | combo MOD... KEYSYM  (e.g. keys 3 period 5 Return)
 #
 # Copyright 2026 David
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -67,6 +67,18 @@ elif cmd == "dclick":
         time.sleep(0.03)
         button(False)
         time.sleep(0.06)
+    time.sleep(0.3)
+elif cmd == "combo":  # combo Control_L z: the first ones held
+    names = sys.argv[2:]
+    codes = [x11.XKeysymToKeycode(d, x11.XStringToKeysym(n.encode())) for n in names]
+    for c in codes:
+        xtst.XTestFakeKeyEvent(d, c, 1, 0)
+        x11.XFlush(d)
+        time.sleep(0.03)
+    for c in reversed(codes):
+        xtst.XTestFakeKeyEvent(d, c, 0, 0)
+        x11.XFlush(d)
+        time.sleep(0.03)
     time.sleep(0.3)
 elif cmd == "keys":
     for name in sys.argv[2:]:

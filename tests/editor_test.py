@@ -465,6 +465,60 @@ editor.remove(pi)
 pump()
 check("preview: removing the node closes its preview", pi not in editor.previews)
 
+# undo, redo and Clear All
+def steps_settle():
+    end = GLib.get_monotonic_time() + (gn_editor.UNDO_GROUP_MS + 200) * 1000
+    while GLib.get_monotonic_time() < end:
+        pump()
+
+
+editor.load(G.new_graph())
+editor._record()
+ub = editor.add_op("gegl:gaussian-blur", 260, 60)
+ui = editor.add_op("gegl:invert-gamma", 520, 60)
+editor.link("layer", ub)
+editor.link(ub, ui)
+editor.link(ui, "output")
+steps_settle()
+chain = editor.graph()
+editor.set_value(ub, "std-dev-x", 3.0)
+editor.set_value(ub, "std-dev-x", 4.0)
+editor.set_value(ub, "std-dev-x", 5.0)  # (quickly: one step)
+steps_settle()
+five = editor.graph()
+editor.clear_all()
+steps_settle()
+cleared = editor.graph()
+check("Clear All: only the layer and the output, linked, where they were",
+      set(cleared["nodes"]) == {"layer", "output"} and
+      cleared["links"] == [{"from": "layer", "to": "output", "pad": "input"}] and
+      all((cleared["nodes"][k]["x"], cleared["nodes"][k]["y"]) ==
+          (chain["nodes"][k]["x"], chain["nodes"][k]["y"]) for k in ("layer", "output")))
+n = len(changes)
+def diff(a, b):
+    out = []
+    for k in set(a["nodes"]) | set(b["nodes"]):
+        if a["nodes"].get(k) != b["nodes"].get(k):
+            out.append((k, a["nodes"].get(k), b["nodes"].get(k)))
+    if sorted(map(str, a["links"])) != sorted(map(str, b["links"])):
+        out.append(("links", a["links"], b["links"]))
+    return out
+
+
+check("undo after Clear All: the whole chain is back, with its values",
+      editor.undo() and editor.graph() == five and len(changes) > n, diff(editor.graph(), five))
+check("undo: quick changes of one value are one step",
+      editor.undo() and editor.graph() == chain, editor.graph()["nodes"][ub]["props"])
+check("redo: forward again", editor.redo() and editor.graph() == five and
+      editor.redo() and editor.graph() == cleared)
+check("redo: nothing more", not editor.redo())
+editor.undo()
+editor.remove(ui)
+steps_settle()
+check("a new change after undo: no redo", not editor.redo())
+check("undo of a removed node: it is back, linked", editor.undo() and editor.graph() == five)
+check("the buttons follow", editor.undo_button.get_sensitive())
+
 # snap to the grid
 G_ = gn_editor.GRID
 frame = lambda v: (v + gn_editor.SOCKET_RADIUS) % G_ == 0  # noqa: E731

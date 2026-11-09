@@ -43,6 +43,12 @@ steps so that the editor stays responsive. It is worked out again after
 each change; several can be open, and the canvas keeps showing the whole
 graph.
 
+**Undo** with Ctrl+Z (or the arrow buttons), redo with Ctrl+Shift+Z or
+Ctrl+Y: every change to the graph, 50 steps back, quick changes of one
+value as one step. **Clear All** (in the Setups menu) leaves only the
+layer and the output, linked; one Ctrl+Z brings the whole graph back.
+(GIMP's own undo sees only the filter changing.)
+
 **Snap** (on by default) puts the frames of the nodes on the grid when
 they are dragged, added from the menus or arranged.
 
@@ -111,7 +117,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-199 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+208 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, nodes dragged with real
 pointer events (XTest on Xvfb), headless GIMP

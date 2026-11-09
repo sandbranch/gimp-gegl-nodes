@@ -229,6 +229,18 @@ if shot:
 run("click", ox + x, oy + y)
 check("a click on the close button next to the eye removes the node", fresh not in editor.nodes)
 
+# Ctrl+Z from the keyboard undoes, Ctrl+Shift+Z redoes (here: the removal
+# of the node just above)
+before = len(editor.nodes)
+win.set_focus(None)
+run("combo", "Control_L", "z")
+pump(0.3)
+back = len(editor.nodes) == before + 1 and fresh in editor.nodes
+run("combo", "Control_L", "Shift_L", "z")
+pump(0.3)
+check("Ctrl+Z undoes, Ctrl+Shift+Z redoes, from the keyboard",
+      back and fresh not in editor.nodes, (before, back, len(editor.nodes)))
+
 shot = os.environ.get("GN_DRAG_SHOT")
 if shot:
     subprocess.call(["import", "-window", "root", shot])
