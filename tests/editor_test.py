@@ -124,11 +124,11 @@ check("Enter in the search adds the node",
 offered = sorted(i.name for ops in editor.groups().values() for i in ops)
 check("the menu row has every offered filter once",
       offered == sorted(gn_ops.catalog()) and
-      len(editor.menubar.get_children()) == len(editor.groups()))
+      len(editor.category_buttons) == len(editor.groups()))
 check("the Add menu has the same categories", [i.get_label() for i in editor._popup.get_children()]
-      == [i.get_label() for i in editor.menubar.get_children()])
+      == [b.get_label() for b in editor.category_buttons])
 before = set(editor.nodes)
-first = editor.menubar.get_children()[0].get_submenu().get_children()[0]
+first = editor.category_buttons[0].get_popup().get_children()[0]
 first.activate()
 pump()
 check("a filter picked in the menu row is added", len(set(editor.nodes) - before) == 1)

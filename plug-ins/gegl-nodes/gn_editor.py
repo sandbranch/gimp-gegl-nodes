@@ -29,7 +29,17 @@ COLORS = {"input": "#5aa0d8", "aux": "#d8a05a", "aux2": "#a05ad8", "output": "#6
 # themes/Default/common.css). A GtkNodes node is a vertical box, and that
 # background, painted after GtkNodes draws the node's frame, hid parts of
 # the frame (and left parts of it behind when a node moved).
-_CSS = b".gegl-nodes-node { background-color: transparent; background-image: none; }"
+_CSS = b"""
+.gegl-nodes-node { background-color: transparent; background-image: none; }
+/* the row of categories: menu labels, not buttons */
+.gegl-nodes-categories flowboxchild { padding: 0; }
+.gegl-nodes-categories button {
+    background: none; border: none; box-shadow: none;
+    padding: 2px 7px; min-height: 0; min-width: 0;
+}
+.gegl-nodes-categories button:hover,
+.gegl-nodes-categories button:checked { background-color: alpha(currentColor, 0.15); }
+"""
 _css_screens = set()
 
 
@@ -342,18 +352,22 @@ class GraphEditor(Gtk.Box):
         return menu
 
     def _menubar(self):
-        """The same, as a row of menus across the top; it scrolls sideways
-        when the window is narrower than the row."""
-        self.menubar = Gtk.MenuBar()
+        """The same categories as a row of menus across the top, which
+        wraps onto more rows when the window is narrower than the row."""
+        self.menubar = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                                   max_children_per_line=100, column_spacing=0, row_spacing=0,
+                                   margin_start=2, margin_end=2)
+        self.menubar.get_style_context().add_class("gegl-nodes-categories")
+        self.category_buttons = []
         for category, ops in self.groups().items():
-            item = Gtk.MenuItem(label=category.replace("-", " ").capitalize())
-            item.set_submenu(self._ops_menu(ops))
-            self.menubar.append(item)
-        row = Gtk.ScrolledWindow(vscrollbar_policy=Gtk.PolicyType.NEVER,
-                                 hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
-                                 propagate_natural_height=True)
-        row.add(self.menubar)
-        return row
+            menu = self._ops_menu(ops)
+            menu.show_all()
+            button = Gtk.MenuButton(label=category.replace("-", " ").capitalize(),
+                                    relief=Gtk.ReliefStyle.NONE, focus_on_click=False)
+            button.set_popup(menu)
+            self.menubar.add(button)
+            self.category_buttons.append(button)
+        return self.menubar
 
     def _forget_place(self):
         # after an item's "activate", which comes after "deactivate"

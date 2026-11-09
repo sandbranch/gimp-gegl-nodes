@@ -12,9 +12,9 @@ after saving and opening the XCF.
 *Filters > Generic > Node Editor...* The editor opens as its own window
 (see "Docked like Blender" below).
 
-To add a node: pick a filter from the row of menus along the top (one
-menu per GEGL category), click **Add**, press **Shift+A** or right-click
-on the canvas (the node goes where you clicked), or type in the search
+To add a node: pick a filter from the menus along the top (one per GEGL
+category, on as many rows as the window's width needs), click **Add**,
+press **Shift+A** or right-click on the canvas (the node goes where you clicked), or type in the search
 field and press Enter. Link nodes by dragging from a green Output dot to
 an Input dot; the Output node's input is what the layer shows.
 
