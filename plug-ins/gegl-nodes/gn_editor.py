@@ -645,6 +645,16 @@ class GraphEditor(Gtk.Box):
             self._pan = (event.x_root, event.y_root, self.scroller.get_hadjustment().get_value(),
                          self.scroller.get_vadjustment().get_value())
             return True
+        # a press that a widget in a node had (a field, a button), or the
+        # second press of a double click: not a click on the canvas or a
+        # node's frame. (A double click in a field once came here, took
+        # the keys from the field, and Backspace then deleted the node.)
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        source = Gtk.get_event_widget(event)
+        if source is not None and source is not self.view and \
+                not isinstance(source, GtkNodes.Node):
+            return False
         x, y = self._pointer()
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         # a click on the canvas or a node's frame takes the keys from the
@@ -1366,7 +1376,8 @@ class GraphEditor(Gtk.Box):
         if ctrl and key in (Gdk.KEY_d, Gdk.KEY_D):
             self.duplicate_selected()
             return True
-        if not ctrl and key in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_x, Gdk.KEY_BackSpace):
+        # (Delete and X as in Blender; not Backspace, which is for text)
+        if not ctrl and key in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_x):
             self.delete_selected()
             return True
         if key == Gdk.KEY_Escape and self.selection:

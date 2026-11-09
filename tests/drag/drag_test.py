@@ -1,4 +1,5 @@
-# Drags nodes with real pointer events (pointer.py, XTest) on an X
+# Drags nodes, and types into them, with real pointer and key events
+# (pointer.py, XTest) on an X
 # display, and checks that a dragged node follows the pointer: no jumps
 # back and forth, and it ends where the pointer took it (to the grid with
 # snap on). Run by tests/run.sh on Xvfb.
@@ -167,6 +168,33 @@ after = tuple(editor.graph()["nodes"][inv][c] for c in "xy")
 check("group drag: the other selected node moved as far",
       (after[0] - other[0], after[1] - other[1]) == (end[0] - start[0], end[1] - start[1])
       == (80, 50), (start, end, other, after))
+
+# typing into a node's field, after a click and a double click (a double
+# click once took the keys from the field, and Backspace deleted the node)
+
+
+def run(*a):
+    p = subprocess.Popen([sys.executable, os.path.join(here, "pointer.py")] + [str(x) for x in a])
+    while p.poll() is None:
+        pump(0.05)
+    pump(0.4)
+
+
+spin = editor.nodes[blur].gn_widgets["std-dev-x"]
+for how in ("click", "dclick"):
+    for selected in (False, True):
+        editor.select([blur] if selected else [])
+        spin.set_value(1.5)
+        editor.scroller.get_hadjustment().set_value(editor.nodes[blur].get_property("x") - 300)
+        editor.scroller.get_vadjustment().set_value(editor.nodes[blur].get_property("y") - 150)
+        pump(0.4)
+        x, y = spin.translate_coordinates(win, 15, spin.get_allocated_height() // 2)
+        ox, oy = win.get_window().get_origin()[1:]
+        run(how, ox + x, oy + y)
+        run("keys", "End", *(["BackSpace"] * 6), "7", "Return")
+        check("typing into a field after a %s%s: the value is typed, the node stays" % (
+            "double click" if how == "dclick" else "click", " (node selected)" if selected else ""),
+            spin.get_value() == 7.0 and blur in editor.nodes, (spin.get_value(), blur in editor.nodes))
 
 shot = os.environ.get("GN_DRAG_SHOT")
 if shot:

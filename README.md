@@ -30,7 +30,7 @@ filters goes into Other too.
 **Selecting**: click a node to select it, Shift+click to add or take
 one out, or drag a box on the empty canvas (with Shift to add to the
 selection). Ctrl+A selects all, Escape none. Dragging a selected node
-moves all the selected ones. Delete, Backspace or X removes them (never
+moves all the selected ones. Delete or X removes them (never
 the Layer or Output node), Ctrl+D duplicates them with their values and
 the links between them, and **Arrange** with two or more selected lays
 out only those.

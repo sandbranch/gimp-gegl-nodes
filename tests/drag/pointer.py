@@ -1,6 +1,6 @@
 # Real pointer events on an X display (XTest), from a process of its own:
 #   python3 pointer.py move X Y | press | release | drag X0 Y0 X1 Y1 STEPS
-#                      | click X Y | keys KEYSYM...  (e.g. keys 3 period 5 Return)
+#                      | click X Y | dclick X Y | keys KEYSYM...  (e.g. keys 3 period 5 Return)
 #
 # Copyright 2026 David
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -58,6 +58,15 @@ elif cmd == "click":
     button(True)
     time.sleep(0.05)
     button(False)
+    time.sleep(0.3)
+elif cmd == "dclick":
+    move(*map(int, sys.argv[2:4]))
+    time.sleep(0.15)
+    for _ in range(2):
+        button(True)
+        time.sleep(0.03)
+        button(False)
+        time.sleep(0.06)
     time.sleep(0.3)
 elif cmd == "keys":
     for name in sys.argv[2:]:
