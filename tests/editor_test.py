@@ -80,7 +80,7 @@ pump()
 check("values set through the widgets are changes", len(changes) >= n + 2)
 s = G.serialize(editor.graph())
 check("the string has the values and the branch",
-      "std-dev-x=4.5" in s and "abyss-policy=black" in s and "ref=r1" in s
+      "std-dev-x=4.5" in s and "abyss-policy=black" in s and "ref=L" in s
       and "gegl:multiply" in s, s)
 
 editor.add_op("gegl:color-overlay", 700, 300)

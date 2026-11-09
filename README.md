@@ -34,10 +34,13 @@ an Input dot; the Output node's input is what the layer shows.
   `layout` property, so that the layout is saved with the filter.
 - **`plug-ins/gegl-nodes/`**: the GIMP plug-in (Python, GPL-3.0-or-later):
   - `gn_graph.py`: the graph as plain data (JSON), the GEGL graph made
-    from it, and the string for the filter. The string is written by
-    GEGL itself (`gegl_serialize`) from a real GEGL graph, so branches
-    come out as `id=`/`ref=` correctly; colors are then put back exactly
-    (GEGL keeps three decimals).
+    from it, and the string for the filter. The string is written here,
+    with every linked input as `pad=[ ... ]` and a result used more than
+    once named with `id=`/`ref=`: GEGL's own `gegl_serialize` writes only
+    the `input` and `aux` pads, and would drop `aux2` (Remap), `aux1` to
+    `aux16` (Piecewise Blend) and the exposures of Combine Exposures.
+    Each operation's values are still written by GEGL, with colors put
+    back exactly (GEGL keeps three decimals).
   - `gn_ops.py`: which operations are offered, with their input pads and
     editable properties, all from GEGL's introspection: every GEGL
     operation installed shows up, your own ones too.
@@ -65,7 +68,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-86 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+92 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, headless GIMP
 (the filter, changes, a graph that would write a file, an XCF saved and

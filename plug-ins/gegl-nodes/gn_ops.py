@@ -8,6 +8,8 @@
 # (operations/node-graph.c), which is what enforces them; here they only
 # keep operations out of the list that the filter would refuse.
 
+import re
+
 import gi
 gi.require_version("Gegl", "0.4")
 from gi.repository import Gegl  # noqa: E402
@@ -35,7 +37,9 @@ class OpInfo:
         self.categories = (Gegl.Operation.get_key(name, "categories") or "").split(":")
         self.description = Gegl.Operation.get_key(name, "description") or ""
         node = Gegl.Node().create_child(name)
-        self.inputs = sorted(node.list_input_pads(), key=lambda p: (p != "input", p))
+        # input first, then the others in their natural order (aux2 before aux10)
+        self.inputs = sorted(node.list_input_pads(), key=lambda p: (p != "input", [
+            int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]))
         self.outputs = list(node.list_output_pads())
         self.pspecs = list(Gegl.Operation.list_properties(name))
         self.props = [p for p in self.pspecs

@@ -117,12 +117,37 @@ branchy = graph({"blur": ("gegl:gaussian-blur", {"std-dev-x": 3.0, "std-dev-y": 
 
 # --- the graph module
 s = G.serialize(branchy)
-check("serialize: a string with the branch named", "ref=r1" in s and "id=r1" in s, s)
+check("serialize: a string with the branch named", "ref=L" in s and s.startswith("id=L "), s)
 check("serialize: the same graph gives the same string", s == G.serialize(branchy))
 check("serialize: JSON round trip", G.serialize(G.from_json(G.to_json(branchy))) == s)
 ref = direct(branchy)
 check("serialize: the source is changed", ref != plain())
 check("gegl:gegl with the string = the graph itself", through("gegl:gegl", s)[0] == ref)
+
+# a result used twice: blur feeds both inputs of multiply
+twice = graph({"blur": ("gegl:gaussian-blur", {"std-dev-x": 2.0, "std-dev-y": 2.0}),
+               "mul": ("gegl:multiply", {})},
+              [("layer", "blur", "input"), ("blur", "mul", "input"),
+               ("blur", "mul", "aux"), ("mul", "output", "input")])
+s2x = G.serialize(twice)
+check("serialize: a result used twice is named once", "id=r1" in s2x and "ref=r1" in s2x, s2x)
+check("serialize: ... and gives the graph's pixels", through(G.GRAPH_OP, s2x)[0] == direct(twice),
+      s2x)
+
+# inputs past aux: gegl_serialize leaves these out, gn_graph must not
+for op, pads in (("gegl:remap", ["aux", "aux2"]),
+                 ("gegl:piecewise-blend", ["aux1", "aux2", "aux3"])):
+    nodes = {"n": (op, {})}
+    links = [("layer", "n", "input"), ("n", "output", "input")]
+    for i, pad in enumerate(pads):
+        nodes["c%d" % i] = ("gegl:color", {"value": "#%02x%02x%02xff" % (40 + 60 * i, 200 - 50 * i, 90)})
+        links.append(("c%d" % i, "n", pad))
+    many = graph(nodes, links)
+    sm = G.serialize(many)
+    check("serialize: every input of %s (%s)" % (op, ", ".join(pads)),
+          all("%s=[" % pad in sm for pad in pads), sm)
+    check("serialize: ... and %s gives the graph's pixels" % op,
+          through(G.GRAPH_OP, sm)[0] == direct(many), sm)
 out, node = through(G.GRAPH_OP, s)
 check("nodes:graph with the string = the graph itself", out == ref)
 check("nodes:graph: no error for a good graph", node.get_property("error") == "",

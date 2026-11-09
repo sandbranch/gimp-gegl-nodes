@@ -138,21 +138,82 @@ def build(graph, parent, source):
 
 def serialize(graph):
     """The graph string for the nodes:graph filter. Empty when the output
-    is the layer as it is."""
+    is the layer as it is.
+
+    Written here, not by gegl_serialize: that one writes only the input
+    and aux pads, so links into aux2 (gegl:remap), aux1 to aux16
+    (gegl:piecewise-blend) or exposure-N (gegl:exp-combine) were lost.
+    GEGL's chain parser reads any pad as pad=[ ... ]. A result used more
+    than once is named the first time (id=rN) and referred to after that
+    (ref=rN); the layer, when used anywhere but at the start, is named L
+    at the very start of the string."""
     parent = Gegl.Node()
     source = parent.create_child("gegl:nop")
-    end = build(graph, parent, source)
+    end = build(graph, parent, source)  # checks loops and missing operations
     if end is None or end is source:
         return ""
-    text = Gegl.serialize(source, end, "", Gegl.SerializeFlag.TRIM_DEFAULTS)
-    # GEGL names results used twice by their address (id=0x55d0c8e0);
-    # the same graph should give the same string
+    uses = {}
+    for link in graph["links"]:
+        uses[link["from"]] = uses.get(link["from"], 0) + 1
     names = {}
+    done = set()
+    layer_named = [False]
 
-    def rename(m):
-        return names.setdefault(m.group(1), "r%d" % (len(names) + 1))
-    text = re.sub(r"\b(0x[0-9a-f]+)\b", rename, text)
-    return " ".join(_exact_colors(graph, text).split())
+    def chain(node_id):
+        """The tokens that give node_id's output."""
+        if node_id == LAYER:
+            layer_named[0] = True
+            return ["ref=L"]
+        if node_id in done:
+            return ["ref=" + names[node_id]]
+        spec = graph["nodes"][node_id]
+        pads = [p for p in _input_pads(spec["op"])]
+        upstream = input_of(graph, node_id, "input") if "input" in pads else None
+        tokens = chain(upstream) if upstream is not None else []
+        tokens.append(_node_text(spec))
+        for pad in pads:
+            if pad == "input":
+                continue
+            other = input_of(graph, node_id, pad)
+            if other is not None:
+                tokens += ["%s=[" % pad] + chain(other) + ["]"]
+        done.add(node_id)
+        if uses.get(node_id, 0) > 1:
+            names[node_id] = "r%d" % (len(names) + 1)
+            tokens.append("id=" + names[node_id])
+        return tokens
+
+    tokens = chain(input_of(graph, OUTPUT, "input"))
+    # the chain starts at the layer: no ref needed there
+    if tokens and tokens[0] == "ref=L":
+        tokens = tokens[1:]
+        layer_named[0] = "ref=L" in tokens
+    if layer_named[0]:
+        tokens.insert(0, "id=L")
+    return " ".join(" ".join(tokens).split())
+
+
+def _input_pads(op):
+    pads = Gegl.Node().create_child(op).list_input_pads()
+    # input first, then the others in their natural order (aux2 before aux10)
+    return sorted(pads, key=lambda p: (p != "input", [
+        int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]))
+
+
+def _node_text(spec):
+    """One operation with its values, as GEGL writes it (defaults left
+    out), with colors exact."""
+    parent = Gegl.Node()
+    node = parent.create_child(spec["op"])
+    pspecs = {p.name: p for p in Gegl.Operation.list_properties(spec["op"])}
+    for name, value in spec.get("props", {}).items():
+        if name in pspecs:
+            set_value(node, pspecs[name], value)
+    start = parent.create_child("gegl:nop")
+    if "input" in node.list_input_pads():
+        start.connect_to("output", node, "input")
+    text = Gegl.serialize(start, node, "", Gegl.SerializeFlag.TRIM_DEFAULTS)
+    return _exact_colors({"nodes": {"n": spec}}, " ".join(text.split()))
 
 
 def _gegl_color_text(value):
