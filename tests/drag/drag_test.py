@@ -127,6 +127,37 @@ for snap in (False, True):
         check("snap on: its frame is on the grid",
               (gx + gn_editor.SOCKET_RADIUS) % gn_editor.GRID == 0, gx)
 
+# grabbed anywhere on the node, and toward the edges of the canvas: the
+# canvas does not move under the drag (it once refitted itself halfway
+# through one, and the node lost the pointer); the pointer stays on the
+# (1200 x 700) screen
+editor.snap_button.set_active(False)
+editor.select([])
+for name, grab, dx, dy in (("the lower part, up and right", (60, 200), 90, -70),
+                           ("the body, down", (20, 60), 0, 100),
+                           ("toward the left edge", (30, 12), -400, 0),
+                           ("toward the top", (30, 12), 0, -230)):
+    node = editor.nodes[blur]
+    track.clear()
+    # (scrolled so that the node is at 450, 250 in the window)
+    editor.scroller.get_hadjustment().set_value(node.get_property("x") - 450)
+    editor.scroller.get_vadjustment().set_value(node.get_property("y") - 250)
+    pump(0.3)
+    x0, y0 = on_screen(blur, *grab)
+    assert 0 < x0 < 1100 and 0 < y0 < 600 and 0 < x0 + dx < 1100 and 0 < y0 + dy < 600, \
+        "the drag would leave the window: %s" % ((x0, y0, dx, dy),)
+    a = tuple(editor.graph()["nodes"][blur][c] for c in "xy")
+    rest = {k: tuple(editor.graph()["nodes"][k][c] for c in "xy") for k in editor.nodes if k != blur}
+    p = subprocess.Popen([sys.executable, os.path.join(here, "pointer.py"), "drag",
+                          str(x0), str(y0), str(x0 + dx), str(y0 + dy), "25"])
+    while p.poll() is None:
+        pump(0.05)
+    pump(0.6)
+    b = tuple(editor.graph()["nodes"][blur][c] for c in "xy")
+    now = {k: tuple(editor.graph()["nodes"][k][c] for c in "xy") for k in rest}
+    check("drag by %s: follows the pointer, nothing else moves" % name,
+          (b[0] - a[0], b[1] - a[1]) == (dx, dy) and now == rest, (a, b))
+
 # two selected, one dragged: both move as far
 editor.snap_button.set_active(False)
 editor.select([blur, inv])

@@ -103,7 +103,7 @@ prefix of GtkNodes.
 
     tests/run.sh               # all; GN_GUI=0 without the GIMP window test
 
-174 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
+178 checks, plus lint, the build and the isolation check: unit tests in plain GEGL (the graph, the catalog, what
 `nodes:graph` refuses, and that every one of the 155 operations offered is
 accepted by it), the editor widget on a Broadway display, nodes dragged with real
 pointer events (XTest on Xvfb), headless GIMP

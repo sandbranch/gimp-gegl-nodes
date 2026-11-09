@@ -917,22 +917,25 @@ class GraphEditor(Gtk.Box):
         self._scroll_to(x, y)
 
     def _fit_canvas(self, scroll=True):
-        """Makes the canvas reach about a window's size past the nodes on
-        every side. The room on the left and at the top is changed only
-        when it is less than half a window or more than three (so that
-        resizing the window moves nothing); then the nodes and the view
-        move with it, so nothing moves on screen."""
+        """Makes the canvas reach past the nodes on every side: at least a
+        window's size, two after a change. The room on the left and at the
+        top is changed only when it is less than one window or more than
+        four (so that resizing the window moves nothing), and never during
+        a drag (GtkNodes would carry on from the old places); then the
+        nodes and the view move with it, so nothing moves on screen."""
+        if self._drag:
+            return
         h, v = self.scroller.get_hadjustment(), self.scroller.get_vadjustment()
         pw, ph = max(h.get_page_size(), 300), max(v.get_page_size(), 200)
         left, top, right, bottom = self._extent()
         z = self.zoom
         ox, oy = self.origin
-        if not pw / 2 <= ox + left * z <= 3 * pw:
-            ox = int(pw - left * z)
-        if not ph / 2 <= oy + top * z <= 3 * ph:
-            oy = int(ph - top * z)
+        if not pw <= ox + left * z <= 4 * pw:
+            ox = int(2 * pw - left * z)
+        if not ph <= oy + top * z <= 4 * ph:
+            oy = int(2 * ph - top * z)
         dx, dy = ox - self.origin[0], oy - self.origin[1]
-        width, height = int(ox + right * z + pw), int(oy + bottom * z + ph)
+        width, height = int(ox + right * z + 2 * pw), int(oy + bottom * z + 2 * ph)
         if (dx, dy) != (0, 0):
             for node in self.nodes.values():
                 self._world(node)
@@ -942,7 +945,13 @@ class GraphEditor(Gtk.Box):
                 self._show_at(node)
             self._loading = False
             if scroll and self._view_set:
-                self._scroll_to(h.get_value() + dx, v.get_value() + dy)
+                # at once, not after the next layout (a frame with the
+                # nodes moved and the view not yet flashed); the canvas's
+                # new size is not laid out yet, so the scroll range first
+                for adj, d, size in ((h, dx, width), (v, dy, height)):
+                    if d:
+                        adj.set_upper(max(adj.get_upper(), size))
+                        adj.set_value(adj.get_value() + d)
         if self.view.get_size_request() != (width, height):
             self.view.set_size_request(width, height)
         if not self._view_set and h.get_page_size() > 1:

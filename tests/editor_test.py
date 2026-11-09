@@ -218,7 +218,6 @@ editor.set_zoom(1.0)
 # the canvas: room on every side, and it grows
 editor.load(G.new_graph())
 pump()
-w0, h0 = editor.view.get_size_request()
 page = editor.scroller.get_hadjustment().get_page_size()
 lx = editor.view.child_get_property(editor.nodes["layer"], "x")
 check("canvas: room to the left of the nodes (a window's width)", lx >= min(page, 300) - 1,
@@ -230,8 +229,9 @@ fx, fy = (editor.view.child_get_property(editor.nodes[far], "x"),
 check("canvas: a node far up and left fits, with room around it", fx > 0 and fy > 0, (fx, fy))
 check("canvas: the graph keeps where it is", editor.graph()["nodes"][far]["x"] == -900 and
       editor.graph()["nodes"]["layer"]["x"] == G.new_graph()["nodes"]["layer"]["x"])
-w1, h1 = editor.view.get_size_request()
-check("canvas: grew to hold it", w1 > w0 and h1 > h0, ((w0, h0), (w1, h1)))
+page_h = editor.scroller.get_vadjustment().get_page_size()
+check("canvas: at least a window's size of room left of and above it",
+      fx >= min(page, 300) and fy >= min(page_h, 200), (fx, fy, page, page_h))
 
 # resizing the window moves nothing on the canvas (it once moved all
 # the nodes and the view, a frame apart, which flashed)
