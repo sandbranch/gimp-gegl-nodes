@@ -100,8 +100,9 @@ setup is a JSON file in `gegl-nodes/setups` in your GIMP profile folder
 
 ## Install
 
-Needs a native GIMP 3.2 with its GEGL development files (meson, ninja, a
-compiler), and GtkNodes with GObject introspection. GtkNodes is not
+Needs GIMP 3.2 with its development files, meson, ninja and a compiler
+(on Debian and Ubuntu `sudo apt install gimp libgimp-3.0-dev meson
+ninja-build`), and GtkNodes with GObject introspection. GtkNodes is not
 packaged; build the `sandbranch` branch of
 [sandbranch/gtknodes](https://github.com/sandbranch/gtknodes) next to
 this repository, with its `dev/build-local.sh` (into `../gtknodes/_inst`).

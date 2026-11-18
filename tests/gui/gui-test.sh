@@ -9,7 +9,7 @@
 #   tests/gui/gui-test.sh
 #
 # Skips (exit 0) without Chrome, node 22 or broadwayd. GIMP is the
-# native one (GIMP_FLATPAK=0), isolated from your folders
+# native one, isolated from your folders
 # (tests/isolate.sh); only the GIMP and Chrome started here are stopped.
 #
 # Copyright 2026 David
@@ -33,8 +33,6 @@ command -v broadwayd >/dev/null || { echo "GUI SKIP: no broadwayd"; exit 0; }
 [ -f "$home/.local/share/gegl-0.4/plug-ins/node-graph.so" ] ||
   { echo "GUI FAIL: run tests/run.sh first"; exit 1; }
 cdp="node $devtools/gui/cdp.mjs"
-GIMP_FLATPAK=0
-export GIMP_FLATPAK
 # shellcheck source=SCRIPTDIR/../isolate.sh
 . "$tests/isolate.sh"
 

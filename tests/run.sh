@@ -32,8 +32,6 @@ out=$here/output
 home=$out/home
 gtknodes=${GEGL_NODES_GTKNODES:-$src/../gtknodes/_inst}
 status=0
-GIMP_FLATPAK=0
-export GIMP_FLATPAK
 
 # shellcheck source=SCRIPTDIR/isolate.sh
 . "$here/isolate.sh"
